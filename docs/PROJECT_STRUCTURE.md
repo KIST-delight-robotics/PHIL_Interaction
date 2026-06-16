@@ -12,7 +12,6 @@ phil_robot/
 ├── phil_brain.py
 ├── init_phil.sh
 ├── environment.yml
-├── requirements_melo_tts.txt
 ├── assets/
 ├── artifacts/
 ├── docs/
@@ -32,8 +31,8 @@ phil_robot/
   - STT, state snapshot, pipeline 실행, executor 호출, TTS orchestration 담당
 - `init_phil.sh`
   - Jetson/로컬 런타임 초기화 스크립트
-- `environment.yml`, `requirements_melo_tts.txt`
-  - 환경 구성 정의 파일
+- `environment.yml`
+  - 환경 구성 정의 파일 (conda env `drum4` + MeloTTS/torchaudio editable 포함, 단일 파일로 통합)
 
 ### `pipeline/`
 

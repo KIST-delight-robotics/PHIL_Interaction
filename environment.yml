@@ -142,6 +142,8 @@ dependencies:
       - tiktoken==0.7.0
       - tokenizers==0.13.3
       - torch==2.1.0a0+41361538.nv23.6
+      - torchaudio @ git+https://github.com/pytorch/audio.git@6ea1133706801ec6e81bb29142da2e21a8583a0a
+      - -e git+https://github.com/myshell-ai/MeloTTS.git@209145371cff8fc3bd60d7be902ea69cbdb7965a#egg=melotts
       - tqdm==4.67.1
       - transformers==4.27.4
       - typeguard==4.4.0
