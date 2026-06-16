@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+env/
+*.env
+
+# 대용량 설치 파일
+downloads_whl/
+third_party/downloads_whl/
+
+# 생성 미디어 / 산출물 (assets/ 의 reference wav·mp3 는 유지)
+/*.wav
+/*.mp3
+artifacts/
+**/*.log
+
+# 로컬 전용 — 에이전트는 디스크에서 읽되 원격엔 올리지 않는다
+AGENTS.md
+CLAUDE.md
+
+# IDE / 시스템
+.idea/
+.DS_Store
+Thumbs.db
