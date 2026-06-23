@@ -1,5 +1,10 @@
 # Change Log
 
+## 2026-06-17
+- 10:08 KST (UTC+9) — LLM/STT 없이 키보드로 명령을 직접 전송하는 수동 TCP 클라이언트 추가
+  - 수정 파일: 신규 `tests/manual_client.py`
+  - 메모: `runtime/phil_client.py`의 `RobotClient`(연결 재시도/상태 수신 스레드/송신)를 재사용. Contract A 명령 도움말(`help`)과 마지막 상태 출력(`state`) 내장. 줄 단위 프레이밍 위해 명령에 `\n` 부여. `phil_brain.py`를 거치지 않고 빠르게 명령을 테스트할 용도. 기존 `tests/client_test.py`(최소 버전)의 상위 호환.
+
 ## 2026-06-16
 - 15:40 KST (UTC+9) — 의존성 파일을 `environment.yml` 하나로 통합하고 `requirements_melo_tts.txt` 삭제
   - 수정 파일: `environment.yml`, `docs/PROJECT_STRUCTURE.md`, `docs/PROJECT_STRUCTURE_KR.md` / 삭제 `requirements_melo_tts.txt`
