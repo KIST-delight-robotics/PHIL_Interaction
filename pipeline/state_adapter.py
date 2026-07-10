@@ -1,43 +1,51 @@
 import re
 from typing import Dict
 
+# 곡 코드는 Phil-drum-robot config/play_list.json 의 id 를 그대로 쓴다.
 SONG_LABELS = {
-    "TIM": "This Is Me",
-    "TY_short": "그대에게",
+    "TI": "This Is Me",
+    "TY": "그대에게",
     "BI": "Baby I Need You",
-    "test_one": "Test Beat",
+    "BF": "필인",
+    "DS": "드럼 솔로",
+    "WS": "왜그래",
     "None": "None",
 }
 PLAY_SKILL_BY_SONG = {
-    "TIM": "play_tim",
-    "TY_short": "play_ty_short",
+    "TI": "play_ti",
+    "TY": "play_ty",
     "BI": "play_bi",
-    "test_one": "play_test_one",
+    "BF": "play_bf",
+    "DS": "play_ds",
+    "WS": "play_ws",
 }
 SONG_QUERY_ALIASES = {
-    "TIM": ["this is me", "tim"],
-    "TY_short": ["그대에게", "ty_short"],
-    "BI": ["baby i need you", "bi"],
-    "test_one": ["test beat", "테스트 비트", "test_one"],
+    "TI": ["this is me", "디스 이즈 미", "디스이즈미", "tim"],
+    "TY": ["그대에게"],
+    "BI": ["baby i need you", "베이비 아이 니드 유", "bi"],
+    "BF": ["필인", "fillin", "fill in"],
+    "DS": ["드럼 솔로", "드럼솔로", "drum solo"],
+    "WS": ["왜그래", "왜 그래", "why so"],
 }
 WAVE_REQUEST_KEYWORDS = ["손흔들", "손 흔들", "인사", "wave"]
 PLAY_REQUEST_SUFFIXES = ["해줘", "해주세요", "해", "줘", "틀어", "연주", "쳐", "시작"]
 ROBOT_NAME_ALIASES = {"필", "phil"}
 
+# 관절명은 Phil-drum-robot motors.json 이름을 그대로 쓴다.
 JOINT_QUERY_ALIASES = [
-    ("왼쪽 손목", "L_wrist", "왼쪽 손목"),
-    ("왼손목", "L_wrist", "왼쪽 손목"),
-    ("오른쪽 손목", "R_wrist", "오른쪽 손목"),
-    ("오른손목", "R_wrist", "오른쪽 손목"),
+    ("왼쪽 손목", "left_wrist", "왼쪽 손목"),
+    ("왼손목", "left_wrist", "왼쪽 손목"),
+    ("오른쪽 손목", "right_wrist", "오른쪽 손목"),
+    ("오른손목", "right_wrist", "오른쪽 손목"),
     ("허리", "waist", "허리"),
-    ("왼쪽 팔", "L_arm1", "왼쪽 팔"),
-    ("왼팔", "L_arm1", "왼쪽 팔"),
-    ("오른쪽 팔", "R_arm1", "오른쪽 팔"),
-    ("오른팔", "R_arm1", "오른쪽 팔"),
-    ("왼쪽 발", "L_foot", "왼쪽 발"),
-    ("왼발", "L_foot", "왼쪽 발"),
-    ("오른쪽 발", "R_foot", "오른쪽 발"),
-    ("오른발", "R_foot", "오른쪽 발"),
+    ("왼쪽 팔", "left_shoulder_1", "왼쪽 팔"),
+    ("왼팔", "left_shoulder_1", "왼쪽 팔"),
+    ("오른쪽 팔", "right_shoulder_1", "오른쪽 팔"),
+    ("오른팔", "right_shoulder_1", "오른쪽 팔"),
+    ("왼쪽 발", "left_pedal", "왼쪽 발"),
+    ("왼발", "left_pedal", "왼쪽 발"),
+    ("오른쪽 발", "right_pedal", "오른쪽 발"),
+    ("오른발", "right_pedal", "오른쪽 발"),
 ]
 
 ANGLE_QUERY_PATTERN = re.compile(r"(각도|몇\s*도|몇도)")
@@ -48,7 +56,7 @@ REPERTOIRE_QUERY_PATTERNS = [
     re.compile(r"(노래|곡)\s*(목록|리스트)"),
     re.compile(r"레퍼토리"),
 ]
-AVAILABLE_SONG_CODES = ["TIM", "test_one", "TY_short", "BI"]
+AVAILABLE_SONG_CODES = ["TI", "TY", "BI", "BF", "DS", "WS"]
 IDENTITY_CONFIRMATION_PATTERN = re.compile(
     r"(?:너의\s*)?이름(?:은)?\s*([A-Za-z가-힣]+)\s*(맞(?:지|죠|니|나요)|이니|인가|인가요)"
 )

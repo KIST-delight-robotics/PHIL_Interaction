@@ -13,13 +13,13 @@ from pipeline.robot_fsm import build_run_turn
 from pipeline.session import SessionContext, update_session
 from runtime.melo_engine import TTS_Engine
 from runtime.mic_listener import MicListener
-from runtime.phil_client import RobotClient, get_robot_state_snapshot
+from runtime.phil_client import RobotClient
 
 # ==========================================
 # Config
 # ==========================================
 HOST = "127.0.0.1"
-PORT = 9999
+PORT = 1951
 
 
 def get_mem_usage():
@@ -179,7 +179,8 @@ def main():
         bot=bot,
         executor=executor,
         get_session=get_session,
-        get_state_fn=get_robot_state_snapshot,
+        # 배경 폴링 없이 턴 시작 시점에만 GET_STATUS 를 보내 fresh 상태를 얻는다.
+        get_state_fn=bot.fetch_state_snapshot,
         classifier_model=CLASSIFIER_MODEL,
         planner_model=PLANNER_MODEL,
     )

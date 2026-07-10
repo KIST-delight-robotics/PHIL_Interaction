@@ -63,8 +63,9 @@ def run_brain_turn(
     """
     robot_state = adapt_robot_state(robot_state)
 
-    # ── prefilter (raw user_text) ─────────────────────────────────────────
-    prefilter = build_prefilter_plan(user_text)
+    # ── prefilter (user_text + 상태 스냅샷) ──────────────────────────────
+    # 연주 제어(pause/stop/speed)가 상태 의존이라 런타임과 동일하게 state 를 넘긴다.
+    prefilter = build_prefilter_plan(user_text, robot_state)
     if prefilter is not None:
         classifier_output, planner_output, planner_domain = prefilter
         validated_plan = build_validated_plan(

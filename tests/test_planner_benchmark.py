@@ -26,7 +26,7 @@ class PlannerBenchmarkTest(unittest.TestCase):
 
         self.assertTrue(prompt_text.startswith(PLANNER_SHARED_RULES))
         self.assertTrue(prompt_text.endswith(DOMAIN_INSTRUCTIONS["motion"]))
-        self.assertIn("look_forward skill 이나 look:0,90 명령을 추가하지 않는다", prompt_text)
+        self.assertIn("look_forward skill 이나 LOOK|0|0 명령을 추가하지 않는다", prompt_text)
         self.assertIn("긍정은 nod_yes, 부정은 shake_no", prompt_text)
         self.assertIn("준비 자세", prompt_text)
         self.assertIn("unrelated social skill", prompt_text)
@@ -62,7 +62,7 @@ class PlannerBenchmarkTest(unittest.TestCase):
     def test_wave_hi_skill_no_longer_forces_forward_look(self) -> None:
         op_cmds, warnings = expand_skills(["wave_hi"])
 
-        self.assertEqual(op_cmds, ["gesture:wave"])
+        self.assertEqual(op_cmds, ["GESTURE|wave"])
         self.assertEqual(warnings, [])
 
     def test_build_validated_plan_overrides_relative_motion_speech(self) -> None:
@@ -72,8 +72,8 @@ class PlannerBenchmarkTest(unittest.TestCase):
                 "state": 0,
                 "is_lock_key_removed": True,
                 "is_fixed": True,
-                "current_angles": {"R_wrist": 20.0},
-                "last_action": "move:R_wrist,20",
+                "current_angles": {"right_wrist": 20.0},
+                "last_action": "MOVE|right_wrist|20",
             },
             classifier_output={
                 "intent": "motion_request",
@@ -87,7 +87,7 @@ class PlannerBenchmarkTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(plan_obj.valid_op_cmds, ["move:R_wrist,35"])
+        self.assertEqual(plan_obj.valid_op_cmds, ["MOVE|right_wrist|35"])
         self.assertIn("오른쪽 손목", plan_obj.speech)
         self.assertIn("15도", plan_obj.speech)
 
@@ -98,8 +98,8 @@ class PlannerBenchmarkTest(unittest.TestCase):
                 "state": 0,
                 "is_lock_key_removed": True,
                 "is_fixed": True,
-                "current_angles": {"R_wrist": 70.0},
-                "last_action": "move:R_wrist,70",
+                "current_angles": {"right_wrist": 70.0},
+                "last_action": "MOVE|right_wrist|70",
             },
             classifier_output={
                 "intent": "motion_request",
@@ -107,34 +107,34 @@ class PlannerBenchmarkTest(unittest.TestCase):
             },
             planner_output={
                 "skills": [],
-                "op_cmd": ["move:L_wrist,30", "wait:1", "move:L_wrist,30", "wait:1"],
+                "op_cmd": ["MOVE|left_wrist|30", "MOVE|left_wrist|30"],
                 "speech": "손목을 30도씩 두 번 내립니다.",
                 "reason": "relative repeat sequence",
             },
         )
 
-        self.assertEqual(plan_obj.valid_op_cmds, ["move:R_wrist,40", "move:R_wrist,10"])
+        self.assertEqual(plan_obj.valid_op_cmds, ["MOVE|right_wrist|40", "MOVE|right_wrist|10"])
         self.assertIn("두번", plan_obj.speech)
         self.assertIn("30도", plan_obj.speech)
         self.assertIn("60도", plan_obj.speech)
 
     def test_parse_plan_response_accepts_compact_schema(self) -> None:
         parsed_obj = parse_plan_response(
-            '{"s":["wave_hi"],"c":["gesture:wave"],"t":"안녕하세요!","r":"wave ok"}'
+            '{"s":["wave_hi"],"c":["GESTURE|wave"],"t":"안녕하세요!","r":"wave ok"}'
         )
 
         self.assertEqual(parsed_obj["skills"], ["wave_hi"])
-        self.assertEqual(parsed_obj["op_cmd"], ["gesture:wave"])
+        self.assertEqual(parsed_obj["op_cmd"], ["GESTURE|wave"])
         self.assertEqual(parsed_obj["speech"], "안녕하세요!")
         self.assertEqual(parsed_obj["reason"], "wave ok")
 
     def test_parse_plan_response_keeps_legacy_schema_compat(self) -> None:
         parsed_obj = parse_plan_response(
-            '{"skills":["wave_hi"],"op_cmd":["gesture:wave"],"speech":"안녕하세요!","reason":"wave ok"}'
+            '{"skills":["wave_hi"],"op_cmd":["GESTURE|wave"],"speech":"안녕하세요!","reason":"wave ok"}'
         )
 
         self.assertEqual(parsed_obj["skills"], ["wave_hi"])
-        self.assertEqual(parsed_obj["op_cmd"], ["gesture:wave"])
+        self.assertEqual(parsed_obj["op_cmd"], ["GESTURE|wave"])
         self.assertEqual(parsed_obj["speech"], "안녕하세요!")
         self.assertEqual(parsed_obj["reason"], "wave ok")
 
@@ -147,11 +147,11 @@ class PlannerBenchmarkTest(unittest.TestCase):
             "expected": {
                 "intent": "motion_request",
                 "planner_domain": "motion",
-                "valid_commands_contains_all": ["gesture:wave"],
+                "valid_commands_contains_all": ["GESTURE|wave"],
             },
         }
         plan_obj = ValidatedPlan(
-            valid_op_cmds=["gesture:wave"],
+            valid_op_cmds=["GESTURE|wave"],
             speech="안녕하세요!",
             reason="wave ok",
         )
@@ -164,10 +164,10 @@ class PlannerBenchmarkTest(unittest.TestCase):
             planner_domain="motion",
             planner_input="{}",
             classifier_raw_response_text='{"intent":"motion_request"}',
-            planner_raw_response_text='{"skills":[],"op_cmd":["gesture:wave"],"speech":"안녕하세요!","reason":"wave ok"}',
+            planner_raw_response_text='{"skills":[],"op_cmd":["GESTURE|wave"],"speech":"안녕하세요!","reason":"wave ok"}',
             planner_output={
                 "skills": [],
-                "op_cmd": ["gesture:wave"],
+                "op_cmd": ["GESTURE|wave"],
                 "speech": "안녕하세요!",
                 "reason": "wave ok",
             },
@@ -221,10 +221,10 @@ class PlannerBenchmarkTest(unittest.TestCase):
             "id": "motion_wave_blocked_by_lock",
             "tags": ["smoke", "motion", "safety"],
             "failed_checks": [
-                {"name": "validator.valid_op_cmds_any_of", "expected": [[]], "actual": ["gesture:wave"]},
+                {"name": "validator.valid_op_cmds_any_of", "expected": [[]], "actual": ["GESTURE|wave"]},
             ],
             "actual": {
-                "valid_op_cmds": ["gesture:wave"],
+                "valid_op_cmds": ["GESTURE|wave"],
                 "planner_called": True,
                 "planner_parse_ok": True,
                 "planner_is_fallback": False,
@@ -280,7 +280,8 @@ class PlannerBenchmarkTest(unittest.TestCase):
         self.assertEqual(turn_obj.planner_raw_response_text, "")
         self.assertEqual(turn_obj.validated_plan.valid_op_cmds, [])
         self.assertIn("This Is Me", turn_obj.validated_plan.speech)
-        self.assertIn("Test Beat", turn_obj.validated_plan.speech)
+        self.assertIn("드럼 솔로", turn_obj.validated_plan.speech)
+        self.assertIn("왜그래", turn_obj.validated_plan.speech)
         self.assertIn("그대에게", turn_obj.validated_plan.speech)
         self.assertIn("Baby I Need You", turn_obj.validated_plan.speech)
 
@@ -307,7 +308,7 @@ class PlannerBenchmarkTest(unittest.TestCase):
         self.assertEqual(turn_obj.planner_domain, "motion")
         self.assertEqual(turn_obj.planner_input, "")
         self.assertEqual(turn_obj.planner_raw_response_text, "")
-        self.assertEqual(turn_obj.validated_plan.valid_op_cmds, ["gesture:shake"])
+        self.assertEqual(turn_obj.validated_plan.valid_op_cmds, ["GESTURE|shake"])
         self.assertEqual(turn_obj.validated_plan.speech, "아니요, 제 이름은 필이에요.")
 
     @patch("phil_robot.pipeline.brain_pipeline.call_json_llm")
@@ -324,7 +325,7 @@ class PlannerBenchmarkTest(unittest.TestCase):
                 "last_action": "None",
                 "is_lock_key_removed": True,
                 "error_message": "None",
-                "current_angles": {"waist": 0.0, "R_wrist": 20.0, "L_wrist": 20.0},
+                "current_angles": {"waist": 0.0, "right_wrist": 20.0, "left_wrist": 20.0},
             },
         )
 
@@ -333,7 +334,7 @@ class PlannerBenchmarkTest(unittest.TestCase):
         self.assertEqual(turn_obj.planner_domain, "play")
         self.assertEqual(turn_obj.planner_input, "")
         self.assertEqual(turn_obj.planner_raw_response_text, "")
-        self.assertEqual(turn_obj.validated_plan.valid_op_cmds, ["gesture:wave", "r", "p:TIM"])
+        self.assertEqual(turn_obj.validated_plan.valid_op_cmds, ["GESTURE|wave", "PLAY|TI"])
         self.assertIn("This Is Me", turn_obj.validated_plan.speech)
 
     def test_smoke_latency_summary_uses_json_fixture_metrics(self) -> None:
@@ -433,11 +434,11 @@ class PlannerBenchmarkTest(unittest.TestCase):
                     {
                         "name": "validator.valid_op_cmds_exact",
                         "expected": [],
-                        "actual": ["gesture:nod"],
+                        "actual": ["GESTURE|nod"],
                     }
                 ],
                 "actual": {
-                    "valid_op_cmds": ["gesture:nod"],
+                    "valid_op_cmds": ["GESTURE|nod"],
                     "speech": "지금은 연주 중입니다.",
                     "planner_is_fallback": False,
                 },
@@ -479,7 +480,7 @@ class PlannerBenchmarkTest(unittest.TestCase):
         self.assertIn("실제로 나온 것", md_text)
         self.assertIn("명령 불일치", md_text)
         self.assertIn("명령 불일치: 없음", md_text)
-        self.assertIn("명령 불일치: gesture:nod", md_text)
+        self.assertIn("명령 불일치: GESTURE\\|nod", md_text)  # md 표에서 | 는 \| 로 이스케이프된다
         self.assertIn("1/2 (50.0%)", md_text)
         self.assertIn("p95", md_text)
 
@@ -506,21 +507,21 @@ class PlannerBenchmarkTest(unittest.TestCase):
                 "planner_wall_sec": 1.0,
                 "planner_response_chars": 20,
                 "planner_raw_response_text": '{"speech":"안녕"}',
-                "valid_op_cmds": ["gesture:wave"],
+                "valid_op_cmds": ["GESTURE|wave"],
                 "speech": "안녕",
             },
             {
                 "planner_wall_sec": 2.0,
                 "planner_response_chars": 24,
                 "planner_raw_response_text": '{"speech":"안녕하세요"}',
-                "valid_op_cmds": ["gesture:wave"],
+                "valid_op_cmds": ["GESTURE|wave"],
                 "speech": "안녕하세요",
             },
             {
                 "planner_wall_sec": 3.0,
                 "planner_response_chars": 24,
                 "planner_raw_response_text": '{"speech":"안녕하세요"}',
-                "valid_op_cmds": ["gesture:wave", "h"],
+                "valid_op_cmds": ["GESTURE|wave", "POSE|home"],
                 "speech": "안녕하세요",
             },
         ]

@@ -41,7 +41,7 @@ class Executor:
         for cmd in commands:
             print(f"📡 [Executor] 명령 전송: {cmd}")
             try:
-                self._bot.send_command(cmd + "\n")
+                self._bot.send_command(cmd)
             except Exception as exc:
                 print(f"⚠️ [Executor] 전송 실패: {exc}")
 

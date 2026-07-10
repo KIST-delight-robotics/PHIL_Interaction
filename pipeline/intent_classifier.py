@@ -2,7 +2,11 @@ import json
 import re
 
 from .failure import build_classifier_failure_result
-from .state_adapter import detect_joint_angle_query, detect_repertoire_query
+from .state_adapter import (
+    detect_joint_angle_query,
+    detect_repertoire_query,
+    detect_song_request_code,
+)
 
 # config 는 패키지 깊이에 따라 경로가 달라 fallback 을 유지한다.
 # (phil_brain 모드: pipeline 이 top-level → 'config' / eval·tests 모드: phil_robot.pipeline → '..config')
@@ -38,14 +42,23 @@ PLAY_ACTION_KEYWORDS = [
 ]
 PLAY_SONG_KEYWORDS = [
     "this is me",
+    "디스 이즈 미",
+    "디스이즈미",
     "그대에게",
     "baby i need you",
-    "test beat",
-    "test_one",
+    "베이비 아이 니드 유",
+    "필인",
+    "드럼 솔로",
+    "드럼솔로",
+    "drum solo",
+    "왜그래",
+    "왜 그래",
+    "why so",
     "tim",
-    "ty_short",
     "bi",
 ]
+# 곡 제목 승격을 막는 정지/일시정지 신호 — "그대에게 그만 틀어" 같은 발화 보호용
+PLAY_STOP_GUARDS = ["그만", "멈춰", "중지", "정지", "일시정지", "스톱"]
 READY_POSE_TEXTS = {
     "준비",
     "준비해",
@@ -257,6 +270,16 @@ def normalize_intent_result(intent_result, user_text):
         result["needs_motion"] = False
 
     if result["intent"] in {"unknown", "chat"} and looks_like_play_request(normalized_text):
+        result["intent"] = "play_request"
+        result["needs_motion"] = True
+
+    # 곡 제목 + 연주 동사가 함께 있으면 classifier 오분류와 무관하게 play 로 승격한다.
+    # ("왜 그래 연주해줘"가 stop_request 로 새던 케이스 보정. 정지어가 있으면 승격하지 않는다.)
+    if (
+        detect_song_request_code(normalized_text) is not None
+        and any(keyword in normalized_text for keyword in PLAY_ACTION_KEYWORDS)
+        and not any(keyword in normalized_text for keyword in PLAY_STOP_GUARDS)
+    ):
         result["intent"] = "play_request"
         result["needs_motion"] = True
 

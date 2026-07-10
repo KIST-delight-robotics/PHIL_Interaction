@@ -1,36 +1,34 @@
 from dataclasses import dataclass, field
 from typing import List
 
+# 관절 한계 — Phil-drum-robot config/motors.json 과 동일 (drumrobot_client/main.py JOINTS 표)
 JOINT_LIMITS = {
-    #"waist": (-70.0, 70.0),
-    #"R_arm1": (20.0, 120.0),
-    #"L_arm1": (50.0, 150.0),
-    #"R_arm2": (-40.0, 60.0),
-    #"R_arm3": (30.0, 120.0),
-    #"L_arm2": (-40.0, 60.0),
-    #"L_arm3": (30.0, 120.0),
-    #"R_wrist": (-10.0, 90.0),
-    #"L_wrist": (15.0, 90.0),
-    #"R_foot": (-90.0, 200.0),
-    #"L_foot": (-90.0, 200.0),
     "waist": (-90.0, 90.0),
-    "R_arm1": (0.0, 150.0),
-    "L_arm1": (30.0, 180.0),
-    "R_arm2": (-60.0, 90.0),
-    "R_arm3": (0.0, 140.1),
-    "L_arm2": (-60.0, 90.0),
-    "L_arm3": (0.0, 140.1),
-    "R_wrist": (-108.0, 90.0),
-    "L_wrist": (-108.0, 90.0),
-    "R_foot": (-90.0, 200.0),
-    "L_foot": (-90.0, 200.0),
+    "right_shoulder_1": (0.0, 150.0),
+    "left_shoulder_1": (30.0, 180.0),
+    "right_shoulder_2": (-60.0, 90.0),
+    "right_elbow": (0.0, 140.1),
+    "left_shoulder_2": (-60.0, 90.0),
+    "left_elbow": (0.0, 140.1),
+    "right_wrist": (-90.0, 100.0),
+    "left_wrist": (-90.0, 100.0),
+    "right_pedal": (-90.0, 200.0),
+    "left_pedal": (-90.0, 200.0),
+    "head_yaw": (-90.0, 90.0),
+    "head_pitch": (-100.0, 90.0),
 }
 
-PLAY_CODES = {"TIM", "TY_short", "BI", "test_one"}
+# Phil-drum-robot config/play_list.json 의 곡 id
+PLAY_CODES = {"TI", "TY", "BI", "BF", "DS", "WS"}
 GESTURES = {"hi", "nod", "shake", "wave", "hurray", "happy"}
-SIMPLE_COMMANDS = {"r", "h", "s", "t", "u"}
-# 연주 중 게이트 우회 인터럽트 명령 — state/motion 조건 무관하게 항상 통과
-INTERRUPT_COMMANDS = {"pause", "resume"}
+POSES = {"init", "home", "ready", "shutdown"}
+# 연주 속도 배율 허용 범위 — 서버 PLAY_CTRL|speed 클램프와 동일
+SPEED_SCALE_MIN = 0.5
+SPEED_SCALE_MAX = 2.0
+# LOOK 범위 — head_yaw / head_pitch 한계 (정면 0도)
+LOOK_PAN_MIN, LOOK_PAN_MAX = JOINT_LIMITS["head_yaw"]
+LOOK_TILT_MIN, LOOK_TILT_MAX = JOINT_LIMITS["head_pitch"]
+
 MOTION_KEYWORDS = [
     "손",
     "팔",
@@ -83,43 +81,90 @@ def validate_commands(commands, robot_state):
 
 def normalize_command(command):
     """
-    모델이 과거 포맷을 섞어 내보내도 실행 계층에서는 최대한 표준 명령으로 정규화한다.
-    현재 가장 흔한 케이스는 move:motor,L_wrist,90 -> move:L_wrist,90 이다.
+    opcode 는 대소문자를 표준화한다 (서버도 대소문자 무시).
+    예: play|TI -> PLAY|TI, pause -> PAUSE
     """
     normalized = (command or "").strip()
-    if normalized.startswith("move:motor,"):
-        move_args = normalized[len("move:motor,"):]
-        return f"move:{move_args}"
-    return normalized
+    if not normalized:
+        return ""
+
+    opcode, sep, args = normalized.partition("|")
+    if sep:
+        return f"{opcode.upper()}|{args}"
+    return opcode.upper()
+
+
+def _split_args(command):
+    return [token.strip() for token in command.split("|")[1:]]
 
 
 def validate_command(command, robot_state):
-    if command in INTERRUPT_COMMANDS:
-        return True, ""  # pause/resume은 C++ gate bypass 명령이므로 항상 통과
-    if command in SIMPLE_COMMANDS:
-        return validate_simple_command(command, robot_state)
-    if command.startswith("p:"):
+    opcode = command.split("|", 1)[0]
+
+    # 연주 제어 — 서버 수락 조건(PAUSE/PLAY_CTRL 은 PLAYING, RESUME 은 IDLE)을 미리 검사한다.
+    if opcode == "PAUSE":
+        return validate_playing_only(command, robot_state)
+    if opcode == "PLAY_CTRL":
+        return validate_play_ctrl_command(command, robot_state)
+    if opcode == "RESUME":
+        return validate_resume_command(command, robot_state)
+    if opcode == "PLAY":
         return validate_play_command(command, robot_state)
-    if command.startswith("look:"):
-        return validate_look_command(command, robot_state)
-    if command.startswith("gesture:"):
-        return validate_gesture_command(command, robot_state)
-    if command.startswith("led:"):
-        return validate_led_command(command)
-    if command.startswith("move:"):
+    if opcode == "POSE":
+        return validate_pose_command(command, robot_state)
+    if opcode == "MOVE":
         return validate_move_command(command, robot_state)
+    if opcode == "GESTURE":
+        return validate_gesture_command(command, robot_state)
+    if opcode == "LOOK":
+        return validate_look_command(command, robot_state)
     return False, f"알 수 없는 명령 형식 차단: {command}"
 
 
-def validate_simple_command(command, robot_state):
-    if command == "s":
+def validate_playing_only(command, robot_state):
+    """PAUSE / PLAY_CTRL — 서버가 PLAYING 상태에서만 수락하는 명령."""
+    if robot_state.get("state", 0) != 2:
+        return False, f"지금 연주 중이 아니라서 수행할 수 없음: {command}"
+    return True, ""
+
+
+def validate_play_ctrl_command(command, robot_state):
+    """PLAY_CTRL|stop / PLAY_CTRL|speed|<배율> — 연주 중 제어."""
+    allowed, reason = validate_playing_only(command, robot_state)
+    if not allowed:
+        return False, reason
+
+    args = _split_args(command)
+    if not args:
+        return False, f"PLAY_CTRL 명령 파싱 실패: {command}"
+
+    if args[0] == "stop":
         return True, ""
-    return validate_motion_allowed(command, robot_state)
+
+    if args[0] == "speed":
+        if len(args) < 2:
+            return False, f"PLAY_CTRL speed 배율 누락: {command}"
+        try:
+            scale = float(args[1])
+        except ValueError:
+            return False, f"PLAY_CTRL speed 파싱 실패: {command}"
+        if not (SPEED_SCALE_MIN <= scale <= SPEED_SCALE_MAX):
+            return False, f"속도 배율 범위({SPEED_SCALE_MIN}~{SPEED_SCALE_MAX}) 초과 차단: {command}"
+        return True, ""
+
+    return False, f"알 수 없는 PLAY_CTRL 하위 명령 차단: {command}"
+
+
+def validate_resume_command(command, robot_state):
+    """RESUME — IDLE 에서만 보낸다. 재개 지점 유무 판단은 서버 몫이다."""
+    if robot_state.get("state", 0) != 0:
+        return False, f"현재 state={robot_state.get('state')} 에서는 재개할 수 없음: {command}"
+    return True, ""
 
 
 def validate_play_command(command, robot_state):
-    _, _, song_code = command.partition(":")
-    if song_code not in PLAY_CODES:
+    args = _split_args(command)
+    if not args or args[0] not in PLAY_CODES:
         return False, f"알 수 없는 곡 코드 차단: {command}"
 
     allowed, reason = validate_motion_allowed(command, robot_state)
@@ -132,21 +177,31 @@ def validate_play_command(command, robot_state):
     return True, ""
 
 
+def validate_pose_command(command, robot_state):
+    args = _split_args(command)
+    if not args or args[0] not in POSES:
+        return False, f"알 수 없는 포즈 차단: {command}"
+
+    return validate_motion_allowed(command, robot_state)
+
+
 def validate_look_command(command, robot_state):
     allowed, reason = validate_motion_allowed(command, robot_state)
     if not allowed:
         return False, reason
 
-    try:
-        _, look_args = command.split(":", 1)
-        pan_raw, tilt_raw = look_args.split(",", 1)
-        pan = float(pan_raw)
-        tilt = float(tilt_raw)
-    except ValueError:
-        return False, f"look 명령 파싱 실패: {command}"
+    args = _split_args(command)
+    if len(args) < 2:
+        return False, f"LOOK 명령 파싱 실패: {command}"
 
-    if not (-90.0 <= pan <= 90.0 and 0.0 <= tilt <= 120.0):
-        return False, f"look 범위 초과 차단: {command}"
+    try:
+        pan = float(args[0])
+        tilt = float(args[1])
+    except ValueError:
+        return False, f"LOOK 명령 파싱 실패: {command}"
+
+    if not (LOOK_PAN_MIN <= pan <= LOOK_PAN_MAX and LOOK_TILT_MIN <= tilt <= LOOK_TILT_MAX):
+        return False, f"LOOK 범위 초과 차단: {command}"
 
     return True, ""
 
@@ -156,43 +211,62 @@ def validate_gesture_command(command, robot_state):
     if not allowed:
         return False, reason
 
-    _, _, gesture = command.partition(":")
-    if gesture not in GESTURES:
+    args = _split_args(command)
+    if not args or args[0] not in GESTURES:
         return False, f"gesture 값 차단: {command}"
 
     return True, ""
 
 
-def validate_led_command(command):
-    return False, f"LED 명령은 현재 사용하지 않음: {command}"
-
-
 def validate_move_command(command, robot_state):
+    """
+    MOVE|<joint>|<deg>|<joint>|<deg>|...|<move_time>
+    (joint, deg) 쌍을 검증하고, 홀수로 남는 마지막 인자는 move_time 으로 해석한다.
+    """
     allowed, reason = validate_motion_allowed(command, robot_state)
     if not allowed:
         return False, reason
 
-    try:
-        _, move_args = command.split(":", 1)
-        motor_name, angle_raw = move_args.split(",", 1)
-    except ValueError:
-        return False, f"move 명령 파싱 실패: {command}"
+    args = _split_args(command)
+    if len(args) < 2:
+        return False, f"MOVE 명령 파싱 실패: {command}"
 
-    if motor_name not in JOINT_LIMITS:
-        return False, f"알 수 없는 모터 차단: {command}"
+    pair_index = 0
+    any_pair = False
+    while pair_index + 1 < len(args):
+        joint_name = args[pair_index]
+        angle_raw = args[pair_index + 1]
 
-    # 각도 미지정(null) 은 지어낸 값이 아니라 "사용자가 안 알려줌" 신호 → 되묻기 대상.
-    if angle_raw.strip().lower() in ("null", "none", ""):
-        return False, f"목표 각도가 지정되지 않음: {command}"
+        if joint_name not in JOINT_LIMITS:
+            return False, f"알 수 없는 관절 차단: {command}"
 
-    try:
-        angle = float(angle_raw)
-    except ValueError:
-        return False, f"move 명령 파싱 실패: {command}"
+        # 각도 미지정(null) 은 지어낸 값이 아니라 "사용자가 안 알려줌" 신호 → 되묻기 대상.
+        if angle_raw.strip().lower() in ("null", "none", ""):
+            return False, f"목표 각도가 지정되지 않음: {command}"
 
-    min_angle, max_angle = JOINT_LIMITS[motor_name]
-    if not (min_angle <= angle <= max_angle):
-        return False, f"관절 한계 초과 차단: {command}"
+        try:
+            angle_deg = float(angle_raw)
+        except ValueError:
+            return False, f"MOVE 명령 파싱 실패: {command}"
+
+        min_angle, max_angle = JOINT_LIMITS[joint_name]
+        if not (min_angle <= angle_deg <= max_angle):
+            return False, f"관절 한계 초과 차단: {command}"
+
+        any_pair = True
+        pair_index += 2
+
+    if not any_pair:
+        return False, f"MOVE 명령 파싱 실패: {command}"
+
+    # 홀수로 남은 마지막 인자는 move_time
+    if pair_index < len(args):
+        try:
+            move_time = float(args[pair_index])
+        except ValueError:
+            return False, f"MOVE 이동시간 파싱 실패: {command}"
+        if move_time <= 0:
+            return False, f"MOVE 이동시간 값 차단: {command}"
 
     return True, ""
 
@@ -216,23 +290,18 @@ def validate_motion_allowed(command, robot_state):
 def validate_sequence_rules(commands):
     """
     현재는 강제 차단보다 경고 위주로 둔다.
-    planner가 도입되면 이 계층에서 더 적극적으로 시퀀스를 보정할 수 있다.
     """
     warnings = []
 
-    play_commands = [cmd for cmd in commands if cmd.startswith("p:")]
-    if play_commands and "r" not in commands:
-        warnings.append("play 명령이 준비 자세 없이 생성되었습니다. 현재는 로봇 측 기존 동작에 의존합니다.")
-
     consecutive_moves = 0
     for command in commands:
-        if command.startswith("move:"):
+        if command.startswith("MOVE|"):
             consecutive_moves += 1
         else:
             consecutive_moves = 0
 
         if consecutive_moves >= 3:
-            warnings.append("move 명령이 연속으로 길게 이어집니다.")
+            warnings.append("MOVE 명령이 연속으로 길게 이어집니다.")
             break
 
     return warnings
@@ -249,8 +318,6 @@ def has_actionable_motion_command(commands):
     실제로 로봇 자세/행동을 바꾸는 명령이 하나라도 남아있는지 본다.
     """
     for command in commands:
-        if command.startswith(("move:", "gesture:", "look:", "p:")):
-            return True
-        if command in {"r", "h"}:
+        if command.startswith(("MOVE|", "GESTURE|", "LOOK|", "PLAY|", "POSE|", "HIT|")):
             return True
     return False

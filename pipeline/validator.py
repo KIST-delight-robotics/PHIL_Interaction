@@ -13,7 +13,6 @@ from .command_validator import (
     validate_commands,
 )
 from .motion_resolver import resolve_motion_commands
-from .play_modifier import PlayModifier, parse_play_modifier
 from .skills import expand_skills
 from .state_adapter import block_reason_of
 
@@ -50,7 +49,6 @@ class ValidatedPlan:
     warnings: List[str] = field(default_factory=list)
     speech: str = ""
     reason: str = ""
-    play_modifier: PlayModifier = field(default_factory=PlayModifier)
     # planner 명령이 거부돼 repair 가 필요할 때 채워진다.
     # None 이면 통과(또는 빈 명령). 채워져 있으면 graph 가 repair 루프로 보낸다.
     repair_hint: Optional[RepairHint] = None
@@ -67,19 +65,11 @@ def _content_failure_code(warnings: List[str]) -> str:
         return "unknown_song"
     if "연주 명령 차단" in text:
         return "play_state"
+    if "연주 중이 아니" in text:
+        return "not_playing"
+    if "재개할 수 없" in text:
+        return "cannot_resume"
     return "bad_command"
-
-
-def build_play_modifier_message(play_modifier: PlayModifier) -> str:
-    if play_modifier.tempo_scale < 1.0:
-        return "연주 속도를 느리게 하겠습니다."
-    if play_modifier.tempo_scale > 1.0:
-        return "연주 속도를 빠르게 하겠습니다."
-    if play_modifier.velocity_delta < 0:
-        return "연주 세기를 약하게 하겠습니다."
-    if play_modifier.velocity_delta > 0:
-        return "연주 세기를 강하게 하겠습니다."
-    return ""
 
 
 def build_validated_plan(
@@ -98,8 +88,6 @@ def build_validated_plan(
 
     resolution = resolve_motion_commands(user_text, expanded_op_cmds, robot_state)
     validation = validate_commands(resolution.op_cmds, robot_state)
-    play_modifier = parse_play_modifier(user_text, robot_state)
-    has_play_modifier = not play_modifier.is_identity()
 
     warnings = list(skill_warnings)
     warnings.extend(resolution.warnings)
@@ -108,11 +96,10 @@ def build_validated_plan(
     speech = planner_output.get("speech", "")
 
     # validator 는 speech 작가가 아니라 안전망이다.
-    # play_modifier / 상대 동작 해석 같은 결정적 계산 결과만 speech 에 반영한다.
+    # 상대 동작 해석 같은 결정적 계산 결과만 speech 에 반영한다.
     # 막힘/범위/거부 안내는 planner 가 repair 도메인에서 직접 만든다(아래 repair_hint).
-    if has_play_modifier:
-        speech = build_play_modifier_message(play_modifier) or speech
-    elif resolution.message_override:
+    # (연주 속도 제어는 prefilter 가 speed:<x> 명령으로 직접 처리한다 — 사전 속도 modifier 폐기)
+    if resolution.message_override:
         speech = resolution.message_override
     elif resolution.speech_override and has_actionable_motion_command(validation.valid_commands):
         speech = resolution.speech_override
@@ -139,6 +126,5 @@ def build_validated_plan(
         warnings=warnings,
         speech=speech,
         reason=planner_output.get("reason", ""),
-        play_modifier=play_modifier,
         repair_hint=repair_hint,
     )

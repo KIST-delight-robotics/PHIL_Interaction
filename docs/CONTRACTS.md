@@ -10,97 +10,108 @@
 서로 연결된다. **계약만 지키면 각 컴포넌트는 독립적으로 교체·재작성할 수 있다.**
 
 ```text
-┌─────────────┐   Contract A          ┌──────────────────┐   Contract B           ┌──────────────┐
-│  phil-brain │  TCP 9999 (NDJSON)     │  phil-controller │  SocketCAN + DXL serial │   phil-sil   │
-│  (LLM brain)│ ────────────────────▶  │   (C++ 제어기)    │ ─────────────────────▶ │  (또는 실제   │
-│             │ ◀──── state JSON ───── │                  │ ◀──── feedback frame ── │   하드웨어)   │
-└─────────────┘                        └──────────────────┘                         └──────────────┘
+┌─────────────┐   Contract A               ┌────────────────────┐   Contract B           ┌──────────────┐
+│  phil-brain │  TCP 1951 (`|` opcode)      │  phil-controller   │  (제어기 하드웨어 계층)  │   하드웨어    │
+│  (LLM brain)│ ─────────────────────────▶  │ (Phil-drum-robot   │ ─────────────────────▶ │  (또는 SIL)   │
+│             │ ◀── GET_STATUS 폴링 응답 ──  │  drumrobot_server) │                        │              │
+└─────────────┘                             └────────────────────┘                        └──────────────┘
 ```
 
-- **Contract A**: `phil-brain` ↔ `phil-controller`, TCP 포트 `9999`, 줄바꿈 구분 JSON/명령
-- **Contract B**: `phil-controller` ↔ `phil-sil`(또는 실제 모터 bus), SocketCAN `can_frame` + Dynamixel Protocol 2.0 serial packet
+- **Contract A**: `phil-brain` ↔ `phil-controller`(= `Phil-drum-robot/drumrobot_server`), TCP 포트 `1951`,
+  `|` 구분 opcode 명령 + `GET_STATUS` 폴링 응답
+- **Contract B**: 제어기 ↔ 하드웨어/SIL. 아래 B 섹션은 **구 DrumRobot2 제어기 기준**의 기록이며,
+  신 Phil-drum-robot 제어기의 하드웨어 계층 계약은 추후 문서화한다.
 
-`phil-controller`가 두 계약의 **허브**다. CAN/DXL 출력은 실제 하드웨어든 SIL이든 동일하다
-(SIL은 환경변수가 아니라 인터페이스 존재 여부로만 결정된다).
+> **2026-07-09 전환**: ground truth 제어기가 `DrumRobot2`(AgentSocket, TCP 9999, NDJSON push)에서
+> `Phil-drum-robot/drumrobot_server`(TCP 1951, `|` opcode, GET_STATUS 폴링)로 바뀌었다.
+> brain 내부 파이프라인(스킬/planner/validator/resolver)도 **wire 문법을 그대로 쓴다** —
+> 구 내부 토큰(`p:TI`, `pause`, `move:` 등)과 번역 계층(`runtime/protocol.py`)은 폐기됐고,
+> `phil_client.send_command()`는 명령을 무번역 전송한다. 관절명도 `motors.json` 이름으로 통일.
 
 ---
 
-## Contract A — Brain ↔ Controller (TCP 9999)
+## Contract A — Brain ↔ Controller (TCP 1951)
 
 ### A.1 연결
 
-- **서버**: `phil-controller` (`AgentSocket`). `INADDR_ANY:9999`, `SOCK_STREAM`, listen backlog 3.
-- **클라이언트**: `phil-brain` (`runtime/phil_client.py`). 기본 `127.0.0.1:9999`로 접속.
-- **방향**: brain(client) → controller(server)로 접속. 별도 handshake 없음. 접속 성공 시 controller가
-  `">>> [Agent] Brain Connected!"` 로그를 찍는다.
-- **인코딩**: UTF-8.
-- **프레이밍**: 줄바꿈(`\n`) 구분. 양방향 모두 한 메시지 = 한 줄(`\n` 종료).
-  - 예외: `{`로 시작하는 multi-line JSON 명령은 controller가 중괄호 균형이 맞을 때까지 누적해 파싱한다.
+- **서버**: `Phil-drum-robot/drumrobot_server` (`TcpServer`). `INADDR_ANY:1951`, `SOCK_STREAM`.
+- **클라이언트**: `phil-brain` (`runtime/phil_client.py`). 기본 `127.0.0.1:1951`로 접속.
+- **동시 접속**: 서버는 **한 번에 한 클라이언트만** 처리한다(accept 루프가 단일 연결 blocking).
+  brain 이 유일한 장수명 연결이어야 하며, 별도 모니터링 클라이언트를 동시에 붙일 수 없다.
+- **인코딩**: UTF-8. **프레이밍**: 줄바꿈(`\n`) 구분, 한 메시지 = 한 줄.
+- **opcode 는 대소문자 무시**, 앞뒤 공백/개행은 서버가 trim 한다.
+- **시작 절차(필수)**: 접속 후 `START` 전송 → 서버가 home pose 이동 + INIT 상태(사람이 고정 키 제거 대기)
+  → `READY` 전송 → IDLE. IDLE 이전에는 START/QUIT 외 명령이 거부된다.
+  brain 은 `connect()` 안에서 이 절차를 **키보드 입력**으로 진행한다.
+- **응답**: `GET_STATUS`만 즉시 응답(STATUS 한 줄)하고, 나머지 명령은 전부 fire-and-forget 이다.
+  효과 확인은 GET_STATUS 폴링으로 한다.
 
 ### A.2 Brain → Controller 명령 (한 줄 + `\n`)
 
-| 명령 | 형식 | 의미 |
-|------|------|------|
-| ready | `r` | ready pose |
-| home | `h` | home (게이트 우회) |
-| stop | `s` | 즉시 정지(버퍼 flush) |
-| play | `p:<song_code>` | 곡 연주. song_code ∈ `{TIM, TY_short, BI, test_one}` |
-| move | `move:<joint>,<angle>` | 단일 관절 절대각(도). 예: `move:waist,45` |
-| gesture | `gesture:<name>` | name ∈ `{hi, nod, shake, wave, hurray, happy}` |
-| look | `look:<pan>,<tilt>` | pan ∈ [-90,90], tilt ∈ [0,120] (도) |
-| pause | `pause` | 연주 일시정지 (게이트 우회) |
-| resume | `resume` | 중단 위치부터 재개 (게이트 우회) |
-| tempo | `tempo_scale:<value>` | 다음/현재 연주 템포 보정 (게이트 우회) |
-| velocity | `velocity_delta:<value>` | 타격 세기 보정 (게이트 우회) |
+| wire 명령 (brain 내부 문법과 동일) | 의미 / 수락 조건 |
+|------|------|
+| `START` | STANDBY→INIT (home 이동, 키 제거 대기). handshake 전용 |
+| `READY` | INIT→IDLE. handshake 전용 |
+| `PLAY\|<id>` | 곡 연주. id ∈ `{BI, BF, DS, TI, TY, WS}` (`config/play_list.json`). IDLE 전용. 시작 시 speed 1.0 리셋 |
+| `PAUSE` | 일시정지 + 재개 지점(곡 id, 마디) 저장. PLAYING 전용 |
+| `RESUME` | 저장된 재개 지점부터 재개(오디오 무음). IDLE + pause_point 필요 |
+| `PLAY_CTRL\|stop` | 연주 중지, 재개 지점 폐기. PLAYING 전용 |
+| `PLAY_CTRL\|speed\|<x>` | 연주 속도 배율(0.5~2.0 서버 클램프). PLAYING 전용 |
+| `POSE\|<name>` | 사전 정의 포즈. name ∈ `{init, home, ready, shutdown}`. IDLE 전용 |
+| `MOVE\|<joint>\|<deg>\|...\|<move_time>` | 관절 절대각(도) 다중 쌍 + 이동시간(생략 시 서버 기본 3.0s). IDLE 전용 |
+| `GESTURE\|<name>` | name ∈ `{nod, shake, wave, hi, hurray, happy}`. IDLE 전용 |
+| `LOOK\|<pan>\|<tilt>` | 고개 yaw/pitch(도). 정면 0\|0, pan 왼쪽 양수, tilt 아래 양수. IDLE 전용 |
+| `HIT\|<target>` | 단일 드럼 타격. IDLE 전용 (음성 미노출 — 추후) |
+| `GET_STATUS` | 상태 조회(유일한 응답 명령). phil_client 폴러 전용 |
+| `QUIT` | shutdown pose 후 종료. IDLE 전용 (미사용) |
 
-**관절 범위(brain 측 validator가 전송 전 검증, 단위 도):**
+**곡 코드 ↔ 라벨:** `TI`=This Is Me, `TY`=그대에게, `BI`=Baby I Need You, `BF`=필인, `DS`=드럼 솔로, `WS`=왜그래
+
+**관절명 (`motors.json` id 순서 — brain 내부/validator/GET_STATUS 모두 이 이름 사용):**
 
 ```text
-waist   (-90, 90)     R_arm1 (0, 150)    L_arm1 (30, 180)
-R_arm2  (-60, 90)     R_arm3 (0, 140.1)
-L_arm2  (-60, 90)     L_arm3 (0, 140.1)
-R_wrist (-108, 90)    L_wrist (-108, 90)
+waist, right_shoulder_1, left_shoulder_1, right_shoulder_2, right_elbow,
+left_shoulder_2, left_elbow, right_wrist, left_wrist,
+right_pedal, left_pedal, head_yaw, head_pitch
 ```
 
-> brain 측 범위는 1차 방어선일 뿐이다. 최종 안전 한계는 controller(C++) 측 범위를 따른다.
+> 구 `tempo_scale:`/`velocity_delta:`(사전 속도/세기 보정)는 **폐기**됐다. 신 서버에 대응 명령이 없고,
+> 속도 조절은 연주 중 `PLAY_CTRL|speed`만 지원한다.
 
-### A.3 Controller → Brain 상태 broadcast (한 줄 JSON + `\n`)
+### A.3 Controller → Brain 상태 (GET_STATUS 폴링 응답, 한 줄 + `\n`)
 
-- 주기 100ms, **직전 전송과 달라졌을 때만** 전송. `state == 2`(연주 중)에는 angle spam 억제.
-- 각도는 소수 2자리 float(도).
+push broadcast 는 없다. brain 은 배경 폴링 없이 **턴 시작 시점에만** `GET_STATUS` 를 보내
+(`phil_client.fetch_state_snapshot`) 아래 형식의 응답을 `ROBOT_STATE` dict 로 번역한다(`parse_status`).
 
-```json
-{
-  "state": 0,
-  "bpm": 100,
-  "is_fixed": true,
-  "current_song": "None",
-  "progress": "0/0",
-  "is_lock_key_removed": false,
-  "last_action": "None",
-  "current_angles": {
-    "waist": 0.00, "R_arm1": 0.00, "L_arm1": 0.00,
-    "R_arm2": 0.00, "R_arm3": 0.00, "L_arm2": 0.00, "L_arm3": 0.00,
-    "R_wrist": 0.00, "L_wrist": 0.00, "R_foot": 0.00, "L_foot": 0.00
-  },
-  "error_message": "..."
-}
+```text
+STATUS|<state>|<q0_deg>|...|<q12_deg>|<speed>|<pause_valid>|<pause_id>|<pause_bar>
 ```
 
-- `state`: `0` Idle / `2` Play(게이트 닫힘, motion 명령 거부) / `6` Error(motion·play 거부). (그 외 값은 코드 참조)
-- `error_message`: `state == 6`일 때만 포함.
-- `is_lock_key_removed`: 안전 키 제거 여부(= 게이트 개방 가능 상태).
+- `<state>` ∈ `{STANDBY, INIT, IDLE, PLAYING, SHUTTINGDOWN}` (연주가 끝나면 서버가 IDLE 로 되돌린다)
+- `<q0..q12>`: 13개 관절의 **마지막 명령 목표각**(실측 아님, 도, motors.json id 순서)
+- `<speed>`: 현재 연주 속도 배율
+- `<pause_valid>|<pause_id>|<pause_bar>`: 재개 지점. 없으면 `0|-|0`
 
-### A.4 게이트(gate) 의미 — 안전망
+**brain 내부 번역 규칙 (`phil_client.parse_status`):**
 
-- controller는 `isGateOpen`(초기값 false)으로 brain 명령을 막는다.
-- **열기**: Idle에서 콘솔에 `k` 입력 시 `openGate()`. 또한 pause 완료 후·연주 종료 시 자동 개방.
-- **닫기**: `p:`(연주 시작)·resume 실행 시 자동으로 `closeGate()` + 큐 flush.
-- **게이트가 닫혀 있어도 통과하는 명령**: `pause`, `resume`, `h`, `tempo_scale:*`, `velocity_delta:*`.
-- 그 외 명령(`move:`, `gesture:`, `look:`, `p:`, `r`)은 게이트 닫힘 상태에서 폐기되고
-  `"[Safeguard] ... 명령 폐기"`로 로깅된다.
+- `state`: IDLE/STANDBY/INIT→`0`, PLAYING→`2`, SHUTTINGDOWN→`6` (기존 숫자 게이트 호환) + `state_str` 원문
+- `is_lock_key_removed`: STANDBY/INIT→`false`(키 제거 전), 그 외→`true`
+- `is_fixed`: 대응 없음 → 항상 `true`
+- `current_angles`: motors.json 관절명 키로 채움
+- `play_speed`: 신규 필드. **pause 3필드는 서버 내부 판단용이라 brain 은 읽지 않는다** (RESUME 은 서버가 알아서 처리)
+- `current_song`: 서버가 주지 않으므로 brain 이 PLAY/RESUME 전송 기록으로 추적
+- `bpm`/`progress`/`error_message`: 신 서버 미제공 → 기본값 유지
 
-> ⚠️ TCP 연결 성공(`Brain Connected`)과 게이트 개방은 별개다. `k` 입력 전에는 motion/play가 폐기될 수 있다.
+### A.4 상태 게이트 — 안전망
+
+구 DrumRobot2 의 `isGateOpen`/`k` 입력 게이트는 **서버 상태 기계로 대체**됐다.
+
+- STANDBY/INIT: START/QUIT 외 전부 거부 (= 안전 키 게이트. brain 은 `is_lock_key_removed=false` 로 매핑)
+- IDLE: PLAY/MOVE/POSE/LOOK/GESTURE/HIT/RESUME/QUIT 수락
+- PLAYING: PAUSE/PLAY_CTRL 만 수락 (motion 계열 전부 거부)
+- 서버 거부는 조용히(로그만) 일어나므로, brain validator 가 같은 조건
+  (`pause`/`stop`/`speed`=PLAYING 전용, `resume`=IDLE 전용, motion=IDLE 전용)을
+  전송 전에 미리 검사해 사용자에게 이유를 말한다.
 
 ---
 

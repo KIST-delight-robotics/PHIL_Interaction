@@ -45,9 +45,12 @@ INTENT_TO_DOMAIN = {
 DOMAIN_ALLOWED_SKILL_CATEGORIES: Dict[str, Set[str]] = {
     PLANNER_DOMAIN_CHAT: set(),
     PLANNER_DOMAIN_MOTION: {"social", "visual", "posture"},
-    PLANNER_DOMAIN_PLAY: {"play", "posture"},
+    # play 도메인에 posture 를 주면 planner 가 습관적으로 ready_pose 를 얹는다.
+    # 서버 PLAY 가 준비 자세를 내부 처리하므로 play 카테고리만 허용한다.
+    PLANNER_DOMAIN_PLAY: {"play"},
     PLANNER_DOMAIN_STATUS: set(),
-    PLANNER_DOMAIN_STOP: {"posture", "system"},
+    # stop 도메인에서 posture 를 빼 ready_pose 유출을 막는다 (홈 복귀는 POSE|home 직접 명령).
+    PLANNER_DOMAIN_STOP: {"system"},
     PLANNER_DOMAIN_REPAIR: set(),
     PLANNER_DOMAIN_DEFAULT: {"social", "visual", "posture", "play", "system"},
 }
@@ -69,7 +72,7 @@ DOMAIN_INSTRUCTIONS = {
 - skill 로 표현하기 어려운 세부 관절 제어만 op_cmd 에 직접 쓴다.
 - 불가능하거나 unsafe 한 동작은 억지로 계획하지 말고 speech 를 통해 정중히 설명한다.""",
     PLANNER_DOMAIN_PLAY: """당신은 play planner 다.
-- 곡 재생, 연주 시작, 준비 자세 같은 연주 관련 요청만 다룬다.
+- 곡 재생, 연주 시작 요청만 다룬다.
 - 가능한 경우 play 관련 skill 을 우선 사용한다.
 - 일반 social skill 이나 unrelated motion 은 넣지 않는다.
 - speech 는 곡 소개와 실행 의도를 짧고 자연스럽게 전달한다.""",
@@ -82,10 +85,13 @@ DOMAIN_INSTRUCTIONS = {
 - robot_state 에 직접 보이는 근거만 설명하고, current_song/progress 만으로 지금 연주 중이라고 추측하지 않는다. can_move=false 이고 busy=false 면 안전 키 상태를 먼저 설명한다.
 - 사과, 설명, 안내를 명확하게 하되 장황하게 늘어놓지 않는다.""",
     PLANNER_DOMAIN_STOP: """당신은 stop/resume planner 다.
-- 멈춤, 정지, 종료, 홈 자세 복귀, 연주 재개 요청에 집중한다.
-- 연주 일시정지(멈춰, 잠깐, 스톱, 정지, 그만) 요청에는 op_cmd 에 "pause" 를 사용한다.
-- 연주 재개(다시 해, 계속 해, 이어서 해) 요청에는 op_cmd 에 "resume" 을 사용한다.
-- 홈 복귀는 "h" 를 사용한다.
+- 멈춤, 정지, 종료, 홈 자세 복귀, 연주 재개, 연주 속도 조절 요청에 집중한다.
+- 일시정지(멈춰, 잠깐, 일시정지)는 op_cmd 에 "PAUSE" — 나중에 멈춘 곳부터 이어서 연주할 수 있다.
+- 완전 중지(그만, 정지, 중지, 스톱)는 op_cmd 에 "PLAY_CTRL|stop" — 재개 지점이 사라진다.
+- 연주 재개(다시 해, 계속 해, 이어서 해) 요청에는 op_cmd 에 "RESUME" 을 사용한다.
+- 연주 중 속도 조절 요청에는 op_cmd 에 "PLAY_CTRL|speed|<배율>" 을 사용한다 (0.5~2.0, 예: PLAY_CTRL|speed|1.20).
+- 홈 복귀는 "POSE|home" 을 사용한다.
+- 연주 시작 요청은 이 도메인의 일이 아니다. 준비 자세(ready_pose)나 연주 명령을 만들지 않는다.
 - speech 는 짧고 명확하게 현재 중단/재개 의도를 전달한다.
 - unrelated motion 이나 social skill 은 넣지 않는다.""",
     PLANNER_DOMAIN_DEFAULT: """당신은 generic planner 다.
@@ -115,29 +121,31 @@ planner 입력에는 다음 정보가 함께 들어온다.
 - needs_motion 이 false 면 skills 와 op_cmd 를 모두 빈 배열로 둔다.
 - 필수 정보(예: 목표 각도)가 없으면 임의로 지어내지 말고 skills 와 op_cmd 를 비운다. 첫 시도에서 스스로 되묻지 않는다. 거부 사유는 validator 가 repair 도메인으로 돌려준다.
 - speech 는 TTS 용 한국어 문장만 쓴다. 괄호 설명문은 금지한다.
-- move 명령은 move:L_wrist,90 처럼 실제 모터 이름을 바로 쓴다.
-- 사용자가 각도/방향/속도 같은 파라미터를 말하지 않았으면 임의로 지어내거나 추측하지 말고 그 자리에 null 을 쓴다. 예: 각도 미지정 → move:waist,null
-- look 명령 형식은 look:pan,tilt 이다. pan 은 좌우 회전이고 오른쪽은 양수, 왼쪽은 음수다. tilt 는 상하 각도이며 정면은 90, 위는 70 근처, 아래는 110 근처다.
-- 사용자가 고개/시선/얼굴/정면/앞쪽을 직접 요청한 경우가 아니면 look_forward skill 이나 look:0,90 명령을 추가하지 않는다.
+- 명령 형식은 | 구분 opcode 이다. MOVE 명령은 MOVE|left_wrist|90 처럼 실제 관절 이름을 바로 쓴다.
+- 사용자가 각도/방향/속도 같은 파라미터를 말하지 않았으면 임의로 지어내거나 추측하지 말고 그 자리에 null 을 쓴다. 예: 각도 미지정 → MOVE|waist|null
+- LOOK 명령 형식은 LOOK|pan|tilt 이다. 정면은 0|0 이고, pan 은 왼쪽이 양수·오른쪽이 음수, tilt 는 아래가 양수·위가 음수다.
+- 사용자가 고개/시선/얼굴/정면/앞쪽을 직접 요청한 경우가 아니면 look_forward skill 이나 LOOK|0|0 명령을 추가하지 않는다.
 - 단순 인사, 손 흔들기, 팔 동작, 허리 동작, 연주 요청에 기본 시선 정렬을 습관적으로 덧붙이지 않는다.
-- low-level move/look/wait 명령은 skill 로 표현하기 어려운 경우에만 op_cmd 에 직접 넣는다.
+- low-level MOVE/LOOK 명령은 skill 로 표현하기 어려운 경우에만 op_cmd 에 직접 넣는다.
 
 사용 가능한 skill 카탈로그:
 {SKILL_CATALOG_TEXT}
 
 사용 가능한 low-level command 예시:
-- r
-- h
-- pause
-- resume
-- look:30,90
-- look:-30,90
-- look:0,70
-- look:0,110
-- gesture:wave
-- move:L_wrist,90
-- move:R_wrist,90
-- p:TIM
+- POSE|ready
+- POSE|home
+- PAUSE
+- PLAY_CTRL|stop
+- RESUME
+- PLAY_CTRL|speed|1.20
+- LOOK|30|0
+- LOOK|-30|0
+- LOOK|0|-20
+- LOOK|0|20
+- GESTURE|wave
+- MOVE|left_wrist|90
+- MOVE|right_wrist|90
+- PLAY|TI
 
 출력 스키마:
 {{
@@ -282,17 +290,18 @@ def enforce_intent_constraints(planner_output: Dict, classifier_output: Dict) ->
         )
 
     if intent == "play_request":
-        allowed_prefixes = ("r", "p:")
+        # 서버 PLAY 가 준비 자세를 내부 처리하므로 연주 명령만 허용한다.
+        allowed_prefixes = ("PLAY|",)
         normalized["op_cmd"] = [
             command for command in normalized["op_cmd"] if command.startswith(allowed_prefixes)
         ]
     elif intent == "stop_request":
-        allowed_prefixes = ("h", "pause", "resume")
+        allowed_prefixes = ("PAUSE", "RESUME", "PLAY_CTRL|", "POSE|home")
         normalized["op_cmd"] = [
             command for command in normalized["op_cmd"] if command.startswith(allowed_prefixes)
         ]
     elif intent == "motion_request":
-        allowed_prefixes = ("move:", "look:", "gesture:", "r", "h")
+        allowed_prefixes = ("MOVE|", "LOOK|", "GESTURE|", "POSE|")
         normalized["op_cmd"] = [
             command for command in normalized["op_cmd"] if command.startswith(allowed_prefixes)
         ]

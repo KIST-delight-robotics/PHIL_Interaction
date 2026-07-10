@@ -50,10 +50,10 @@ class SessionContext:
     # ── 마지막으로 확인된 동작 상태 ────────────────────────────────────────
     # "거기서 더 올려", "아까처럼" 같은 지시를 처리할 때 참조한다.
     last_intent: str = ""
-    last_joint: Optional[str] = None    # 마지막으로 움직인 관절 (예: "L_wrist")
+    last_joint: Optional[str] = None    # 마지막으로 움직인 관절 (예: "left_wrist")
     last_angle: Optional[float] = None  # 마지막 관절 각도 (도)
-    last_look: Optional[str] = None     # 마지막 look 명령 (예: "look:30,90")
-    last_play: Optional[str] = None     # 마지막 play 곡 코드 (예: "TIM")
+    last_look: Optional[str] = None     # 마지막 look 명령 (예: "LOOK|30|0")
+    last_play: Optional[str] = None     # 마지막 play 곡 코드 (예: "TI")
     last_speech: str = ""               # 필의 마지막 발화
 
     # ── cross-turn recovery 대기 상태 ─────────────────────────────────────
@@ -97,20 +97,20 @@ def update_session(
 
     # 실행된 명령에서 관절/시선/연주 상태를 추출한다.
     for cmd in validated.valid_op_cmds:
-        if cmd.startswith("move:"):
-            # "move:L_wrist,75.0" 형식 파싱
-            try:
-                _, move_args = cmd.split(":", 1)
-                joint, angle_raw = move_args.split(",", 1)
-                ctx.last_joint = joint
-                ctx.last_angle = float(angle_raw)
-            except ValueError:
-                pass
-        elif cmd.startswith("look:"):
+        if cmd.startswith("MOVE|"):
+            # "MOVE|left_wrist|75.0|..." 첫 (관절,각) 쌍 파싱
+            cmd_args = cmd.split("|")
+            if len(cmd_args) >= 3:
+                try:
+                    ctx.last_joint = cmd_args[1]
+                    ctx.last_angle = float(cmd_args[2])
+                except ValueError:
+                    pass
+        elif cmd.startswith("LOOK|"):
             ctx.last_look = cmd
-        elif cmd.startswith("p:"):
-            # "p:TIM" → "TIM"
-            ctx.last_play = cmd.split(":", 1)[1]
+        elif cmd.startswith("PLAY|"):
+            # "PLAY|TI" → "TI"
+            ctx.last_play = cmd.split("|", 1)[1]
 
     # ── cross-turn recovery 갱신 ──────────────────────────────────────────
     # 동작이 필요한 턴(actionable)인데 실행할 명령이 안 나왔으면(되묻기/차단/fallback)

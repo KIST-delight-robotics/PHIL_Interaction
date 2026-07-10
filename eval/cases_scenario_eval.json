@@ -86,15 +86,15 @@
       "error_message": "None",
       "current_angles": {
         "waist": 0.0,
-        "R_wrist": 0.0,
-        "L_wrist": 0.0
+        "right_wrist": 0.0,
+        "left_wrist": 0.0
       }
     },
     "expected": {
       "intent": "play_request",
       "planner_domain": "play",
       "skills_any_of": [["play_tim"], ["ready_pose", "play_tim"]],
-      "valid_commands_any_of": [["r", "p:TIM"], ["p:TIM"]],
+      "valid_commands_any_of": [["POSE|ready", "PLAY|TI"], ["PLAY|TI"]],
       "speech_contains_any": ["This Is Me", "연주"]
     }
   },
@@ -108,7 +108,7 @@
       "is_fixed": true,
       "current_song": "TIM",
       "progress": "3/16",
-      "last_action": "p:TIM",
+      "last_action": "PLAY|TI",
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
@@ -132,7 +132,7 @@
       "is_fixed": true,
       "current_song": "TIM",
       "progress": "3/16",
-      "last_action": "p:TIM",
+      "last_action": "PLAY|TI",
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
@@ -188,7 +188,7 @@
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_contains_all": ["gesture:hurray"],
+      "valid_commands_contains_all": ["GESTURE|hurray"],
       "speech_contains_any": ["만세", "올리", "자세"]
     }
   },
@@ -202,17 +202,17 @@
       "is_fixed": true,
       "current_song": "None",
       "progress": "0/1",
-      "last_action": "move:R_wrist,20",
+      "last_action": "MOVE|right_wrist|20",
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
-        "R_wrist": 20.0
+        "right_wrist": 20.0
       }
     },
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_exact": ["move:R_wrist,35"],
+      "valid_commands_exact": ["MOVE|right_wrist|35"],
       "speech_contains_all": ["오른쪽 손목", "15도", "올려"]
     }
   },
@@ -236,7 +236,7 @@
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_contains_all": ["gesture:shake"],
+      "valid_commands_contains_all": ["GESTURE|shake"],
       "speech_contains_any": ["고개", "저어", "아니"]
     }
   },
@@ -261,7 +261,7 @@
       "intent": "motion_request",
       "needs_motion": true,
       "planner_domain": "motion",
-      "valid_commands_contains_all": ["gesture:nod"],
+      "valid_commands_contains_all": ["GESTURE|nod"],
       "speech_contains_all": ["네", "필"]
     }
   },
@@ -286,7 +286,7 @@
       "intent": "motion_request",
       "needs_motion": true,
       "planner_domain": "motion",
-      "valid_commands_contains_all": ["gesture:shake"],
+      "valid_commands_contains_all": ["GESTURE|shake"],
       "speech_contains_all": ["아니", "필"]
     }
   },
@@ -310,7 +310,7 @@
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_any_of": [["r"]],
+      "valid_commands_any_of": [["POSE|ready"]],
       "speech_contains_any": ["준비", "자세"]
     }
   },
@@ -328,27 +328,17 @@
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
-        "R_arm2": 0.0,
-        "L_arm2": 0.0,
-        "R_arm3": 20.0,
-        "L_arm3": 20.0
+        "right_shoulder_2": 0.0,
+        "left_shoulder_2": 0.0,
+        "right_elbow": 20.0,
+        "left_elbow": 20.0
       }
     },
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
       "valid_commands_contains_all": [
-        "move:R_arm2,58",
-        "move:L_arm2,58",
-        "move:R_arm3,95",
-        "move:L_arm3,95",
-        "move:R_wrist,0",
-        "move:L_wrist,0",
-        "wait:3",
-        "move:R_arm2,0",
-        "move:L_arm2,0",
-        "move:R_arm3,20",
-        "move:L_arm3,20"
+        "MOVE|right_shoulder_2|58|left_shoulder_2|58|right_elbow|95|left_elbow|95|right_wrist|0|left_wrist|0|3.0"
       ],
       "speech_contains_all": ["올렸다", "3초", "내립니다"]
     }
@@ -373,7 +363,7 @@
     "expected": {
       "intent": "play_request",
       "planner_domain": "play",
-      "valid_commands_contains_all": ["gesture:wave", "r", "p:TY_short"],
+      "valid_commands_contains_all": ["GESTURE|wave", "POSE|ready", "PLAY|TY"],
       "speech_contains_any": ["그대에게", "인사", "연주"]
     }
   },
@@ -463,23 +453,23 @@
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
-        "R_arm2": 0.0,
-        "L_arm2": 0.0,
-        "R_arm3": 20.0,
-        "L_arm3": 20.0
+        "right_shoulder_2": 0.0,
+        "left_shoulder_2": 0.0,
+        "right_elbow": 20.0,
+        "left_elbow": 20.0
       }
     },
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
       "valid_commands_contains_all": [
-        "move:R_arm2,58",
-        "move:L_arm2,58",
-        "move:R_arm3,95",
-        "move:L_arm3,95",
-        "move:R_wrist,0",
-        "move:L_wrist,0",
-        "gesture:nod"
+        "MOVE|right_shoulder_2|58",
+        "MOVE|left_shoulder_2|58",
+        "MOVE|right_elbow|95",
+        "MOVE|left_elbow|95",
+        "MOVE|right_wrist|0",
+        "MOVE|left_wrist|0",
+        "GESTURE|nod"
       ],
       "speech_contains_all": ["올리", "끄덕"]
     }
@@ -494,17 +484,17 @@
       "is_fixed": true,
       "current_song": "None",
       "progress": "0/1",
-      "last_action": "move:R_wrist,50",
+      "last_action": "MOVE|right_wrist|50",
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
-        "R_wrist": 50.0
+        "right_wrist": 50.0
       }
     },
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_exact": ["move:R_wrist,20", "wait:1", "move:R_wrist,10"],
+      "valid_commands_exact": ["MOVE|right_wrist|20", "MOVE|right_wrist|10"],
       "speech_contains_all": ["30도", "1초", "10도"]
     }
   },
@@ -518,17 +508,17 @@
       "is_fixed": true,
       "current_song": "None",
       "progress": "0/1",
-      "last_action": "move:R_wrist,70",
+      "last_action": "MOVE|right_wrist|70",
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
-        "R_wrist": 70.0
+        "right_wrist": 70.0
       }
     },
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_exact": ["move:R_wrist,40", "move:R_wrist,10"],
+      "valid_commands_exact": ["MOVE|right_wrist|40", "MOVE|right_wrist|10"],
       "speech_contains_all": ["두번", "30도", "60도"]
     }
   },
@@ -547,15 +537,15 @@
       "error_message": "None",
       "current_angles": {
         "waist": 0.0,
-        "R_wrist": 20.0,
-        "L_wrist": 20.0
+        "right_wrist": 20.0,
+        "left_wrist": 20.0
       }
     },
     "expected": {
       "intent": "motion_request",
       "needs_motion": true,
       "planner_domain": "motion",
-      "valid_commands_contains_all": ["gesture:nod"],
+      "valid_commands_contains_all": ["GESTURE|nod"],
       "speech_contains_any": ["안녕", "안녕하세요", "반가"]
     }
   },
@@ -574,14 +564,14 @@
       "error_message": "None",
       "current_angles": {
         "waist": 0.0,
-        "R_wrist": 20.0,
-        "L_wrist": 20.0
+        "right_wrist": 20.0,
+        "left_wrist": 20.0
       }
     },
     "expected": {
       "intent": "play_request",
       "planner_domain": "play",
-      "valid_commands_contains_all": ["gesture:wave", "r", "p:TIM"],
+      "valid_commands_contains_all": ["GESTURE|wave", "POSE|ready", "PLAY|TI"],
       "speech_contains_any": ["This Is Me", "연주"]
     }
   },
@@ -619,19 +609,19 @@
       "is_fixed": true,
       "current_song": "None",
       "progress": "0/1",
-      "last_action": "move:L_arm2,30",
+      "last_action": "MOVE|left_shoulder_2|30",
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
-        "L_arm2": 30.0,
-        "L_arm3": 60.0,
-        "L_wrist": 15.0
+        "left_shoulder_2": 30.0,
+        "left_elbow": 60.0,
+        "left_wrist": 15.0
       }
     },
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_contains_all": ["move:L_arm2,58", "move:L_arm3,95", "move:L_wrist,0"],
+      "valid_commands_contains_all": ["MOVE|left_shoulder_2|58", "MOVE|left_elbow|95", "MOVE|left_wrist|0"],
       "speech_contains_any": ["왼팔", "올리", "조금"]
     }
   },
@@ -645,7 +635,7 @@
       "is_fixed": true,
       "current_song": "None",
       "progress": "0/1",
-      "last_action": "look:0,90",
+      "last_action": "LOOK|0|90",
       "is_lock_key_removed": true,
       "error_message": "None",
       "current_angles": {
@@ -655,7 +645,7 @@
     "expected": {
       "intent": "motion_request",
       "planner_domain": "motion",
-      "valid_commands_contains_all": ["look:30,90"],
+      "valid_commands_contains_all": ["LOOK|30|90"],
       "speech_contains_any": ["오른쪽", "볼게", "보겠습니다"]
     }
   }

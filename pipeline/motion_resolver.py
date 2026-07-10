@@ -6,24 +6,25 @@ from .command_validator import JOINT_LIMITS
 
 DEFAULT_RELATIVE_STEP_DEG = 15.0
 JOINT_LIMIT_EPSILON_DEG = 0.1
+# LOOK 좌표계 (신 서버): 정면 pan 0 / tilt 0, pan 은 왼쪽 양수, tilt 는 아래 양수.
 LOOK_FORWARD_PAN_DEG = 0.0
-LOOK_FORWARD_TILT_DEG = 90.0
+LOOK_FORWARD_TILT_DEG = 0.0
 LOOK_SIDE_PAN_DEG = 30.0
-LOOK_UP_TILT_DEG = 70.0
-LOOK_DOWN_TILT_DEG = 110.0
+LOOK_UP_TILT_DEG = -20.0
+LOOK_DOWN_TILT_DEG = 20.0
 
 JOINT_ALIASES = [
-    ("왼쪽 손목", "L_wrist", "왼쪽 손목"),
-    ("왼손목", "L_wrist", "왼쪽 손목"),
-    ("오른쪽 손목", "R_wrist", "오른쪽 손목"),
-    ("오른손목", "R_wrist", "오른쪽 손목"),
-    ("왼쪽 발", "L_foot", "왼쪽 발"),
-    ("왼발", "L_foot", "왼쪽 발"),
-    ("오른쪽 발", "R_foot", "오른쪽 발"),
-    ("오른발", "R_foot", "오른쪽 발"),
+    ("왼쪽 손목", "left_wrist", "왼쪽 손목"),
+    ("왼손목", "left_wrist", "왼쪽 손목"),
+    ("오른쪽 손목", "right_wrist", "오른쪽 손목"),
+    ("오른손목", "right_wrist", "오른쪽 손목"),
+    ("왼쪽 발", "left_pedal", "왼쪽 발"),
+    ("왼발", "left_pedal", "왼쪽 발"),
+    ("오른쪽 발", "right_pedal", "오른쪽 발"),
+    ("오른발", "right_pedal", "오른쪽 발"),
     ("허리", "waist", "허리"),
-    ("왼쪽 팔목", "L_wrist", "왼쪽 손목"),
-    ("오른쪽 팔목", "R_wrist", "오른쪽 손목"),
+    ("왼쪽 팔목", "left_wrist", "왼쪽 손목"),
+    ("오른쪽 팔목", "right_wrist", "오른쪽 손목"),
 ]
 
 UP_KEYWORDS = ["올려", "올리", "들어", "높여", "위로"]
@@ -67,7 +68,7 @@ def resolve_motion_commands(user_text, op_cmds, robot_state):
     arm_cmds = parse_arm_pose_commands(normalized_text)
     if arm_cmds is not None:
         if _has_sequence_marker(normalized_text) and any(
-            command.startswith("move:") for command in result.op_cmds
+            command.startswith("MOVE|") for command in result.op_cmds
         ):
             result.warnings.append("순차 팔 동작은 planner 시퀀스를 그대로 유지합니다.")
             return result
@@ -169,7 +170,7 @@ def resolve_motion_commands(user_text, op_cmds, robot_state):
 
 def parse_head_look_command(user_text):
     """
-    고개/시선 방향 요청을 look:pan,tilt 명령으로 정규화한다.
+    고개/시선 방향 요청을 LOOK|pan|tilt 명령으로 정규화한다.
     LLM 이 pan/tilt 축을 헷갈려도 이 레이어에서 의미를 바로잡는다.
     """
     text = _normalize_motion_text(user_text)
@@ -182,10 +183,11 @@ def parse_head_look_command(user_text):
     pan_deg = None
     tilt_deg = None
 
+    # pan 은 왼쪽이 양수(반시계)다.
     if any(keyword in text for keyword in LOOK_RIGHT_KEYWORDS):
-        pan_deg = LOOK_SIDE_PAN_DEG
-    elif any(keyword in text for keyword in LOOK_LEFT_KEYWORDS):
         pan_deg = -LOOK_SIDE_PAN_DEG
+    elif any(keyword in text for keyword in LOOK_LEFT_KEYWORDS):
+        pan_deg = LOOK_SIDE_PAN_DEG
     elif any(keyword in text for keyword in LOOK_FORWARD_KEYWORDS):
         pan_deg = LOOK_FORWARD_PAN_DEG
 
@@ -396,9 +398,9 @@ def _infer_joint_from_step_text(text, robot_state):
         return None
 
     joint_name = last_joint["joint_name"]
-    if ("손목" in text or "팔목" in text) and joint_name in {"L_wrist", "R_wrist"}:
+    if ("손목" in text or "팔목" in text) and joint_name in {"left_wrist", "right_wrist"}:
         return last_joint
-    if "발" in text and joint_name in {"L_foot", "R_foot"}:
+    if "발" in text and joint_name in {"left_pedal", "right_pedal"}:
         return last_joint
     if "허리" in text and joint_name == "waist":
         return last_joint
@@ -413,13 +415,12 @@ def _joint_from_last_action(robot_state):
         return None
 
     last_action = robot_state.get("last_action", "")
-    if not isinstance(last_action, str) or not last_action.startswith("move:"):
+    if not isinstance(last_action, str) or not last_action.startswith("MOVE|"):
         return None
 
     try:
-        action_args = last_action.split(":", 1)[1]
-        joint_name = action_args.split(",", 1)[0]
-    except (IndexError, ValueError):
+        joint_name = last_action.split("|")[1].strip()
+    except IndexError:
         return None
 
     for _, candidate_joint_name, display_name in JOINT_ALIASES:
@@ -451,43 +452,34 @@ def _find_arm_side(text):
     return "both"
 
 
+# 팔 자세는 다중 (관절,각) 쌍을 한 MOVE 로 보내 동시에 움직인다 (skills.py 와 동일 수치).
 def build_arm_up_cmds(arm_side):
     if arm_side == "left":
-        return ["move:L_arm2,58", "move:L_arm3,95", "move:L_wrist,0"]
+        return ["MOVE|left_shoulder_2|58|left_elbow|95|left_wrist|0|3.0"]
     if arm_side == "right":
-        return ["move:R_arm2,58", "move:R_arm3,95", "move:R_wrist,0"]
+        return ["MOVE|right_shoulder_2|58|right_elbow|95|right_wrist|0|3.0"]
     return [
-        "move:R_arm2,58",
-        "move:L_arm2,58",
-        "move:R_arm3,95",
-        "move:L_arm3,95",
-        "move:R_wrist,0",
-        "move:L_wrist,0",
+        "MOVE|right_shoulder_2|58|left_shoulder_2|58|right_elbow|95|left_elbow|95"
+        "|right_wrist|0|left_wrist|0|3.0",
     ]
 
 
 def build_arm_down_cmds(arm_side):
     if arm_side == "left":
-        return ["move:L_arm2,0", "move:L_arm3,20"]
+        return ["MOVE|left_shoulder_2|0|left_elbow|20|3.0"]
     if arm_side == "right":
-        return ["move:R_arm2,0", "move:R_arm3,20"]
-    return ["move:R_arm2,0", "move:L_arm2,0", "move:R_arm3,20", "move:L_arm3,20"]
+        return ["MOVE|right_shoulder_2|0|right_elbow|20|3.0"]
+    return ["MOVE|right_shoulder_2|0|left_shoulder_2|0|right_elbow|20|left_elbow|20|3.0"]
 
 
 def build_arm_out_cmds(arm_side):
     if arm_side == "left":
-        return ["move:L_arm1,150", "move:L_arm2,10", "move:L_arm3,95", "move:L_wrist,0"]
+        return ["MOVE|left_shoulder_1|150|left_shoulder_2|10|left_elbow|95|left_wrist|0|3.0"]
     if arm_side == "right":
-        return ["move:R_arm1,30", "move:R_arm2,10", "move:R_arm3,95", "move:R_wrist,0"]
+        return ["MOVE|right_shoulder_1|30|right_shoulder_2|10|right_elbow|95|right_wrist|0|3.0"]
     return [
-        "move:R_arm1,30",
-        "move:L_arm1,150",
-        "move:R_arm2,10",
-        "move:L_arm2,10",
-        "move:R_arm3,95",
-        "move:L_arm3,95",
-        "move:R_wrist,0",
-        "move:L_wrist,0",
+        "MOVE|right_shoulder_1|30|left_shoulder_1|150|right_shoulder_2|10|left_shoulder_2|10"
+        "|right_elbow|95|left_elbow|95|right_wrist|0|left_wrist|0|3.0",
     ]
 
 
@@ -496,7 +488,7 @@ def _format_move_command(joint_name, target_angle):
         target_text = str(int(target_angle))
     else:
         target_text = f"{target_angle:.1f}"
-    return f"move:{joint_name},{target_text}"
+    return f"MOVE|{joint_name}|{target_text}"
 
 
 def _format_look_command(pan_deg, tilt_deg):
@@ -510,7 +502,7 @@ def _format_look_command(pan_deg, tilt_deg):
     else:
         tilt_text = f"{tilt_deg:.1f}"
 
-    return f"look:{pan_text},{tilt_text}"
+    return f"LOOK|{pan_text}|{tilt_text}"
 
 
 def _replace_relative_motion_sequence(op_cmds, move_op_cmd):
@@ -518,13 +510,13 @@ def _replace_relative_motion_sequence(op_cmds, move_op_cmd):
     replaced = False
 
     for command in op_cmds:
-        if command.startswith("move:") and not replaced:
+        if command.startswith("MOVE|") and not replaced:
             updated_commands.append(move_op_cmd)
             replaced = True
             continue
-        if command.startswith("move:"):
+        if command.startswith("MOVE|"):
             continue
-        if command.startswith(("look:", "gesture:")):
+        if command.startswith(("LOOK|", "GESTURE|")):
             continue
         updated_commands.append(command)
 
@@ -539,7 +531,7 @@ def _replace_relative_step_sequence(op_cmds, step_cmds):
     inserted = False
 
     for command in op_cmds:
-        if command.startswith(("move:", "look:", "gesture:")):
+        if command.startswith(("MOVE|", "LOOK|", "GESTURE|")):
             if not inserted:
                 updated_commands.extend(step_cmds)
                 inserted = True
@@ -557,7 +549,7 @@ def _replace_move_sequence(op_cmds, move_cmds):
     inserted = False
 
     for command in op_cmds:
-        if command.startswith("move:"):
+        if command.startswith("MOVE|"):
             if not inserted:
                 updated_commands.extend(move_cmds)
                 inserted = True
@@ -575,10 +567,10 @@ def _replace_or_append_look_op_cmd(op_cmds, look_op_cmd):
     replaced = False
 
     for command in op_cmds:
-        if command.startswith("look:") and not replaced:
+        if command.startswith("LOOK|") and not replaced:
             updated_commands.append(look_op_cmd)
             replaced = True
-        elif not command.startswith("look:"):
+        elif not command.startswith("LOOK|"):
             updated_commands.append(command)
 
     if not replaced:
@@ -591,5 +583,5 @@ def _remove_relative_motion_side_effects(op_cmds):
     return [
         command
         for command in op_cmds
-        if not command.startswith(("move:", "look:", "gesture:"))
+        if not command.startswith(("MOVE|", "LOOK|", "GESTURE|"))
     ]

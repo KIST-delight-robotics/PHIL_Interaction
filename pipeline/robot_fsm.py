@@ -97,7 +97,6 @@ class PhilState(TypedDict, total=False):
     plan_type: str        # "motion" | "play" | "stop" | "chat" | "none"
     speech: str           # 필이 할 말
     commands: List[str]   # 실제 전송할 명령 목록
-    play_modifier: Dict   # tempo_scale / velocity_delta / source / apply_scope (play 전용)
     validated: object     # ValidatedPlan (session 갱신/디버그용)
 
     # ── 디버그 (런타임 출력용, eval 과 무관) ──────────────────────────
@@ -111,8 +110,8 @@ class PhilState(TypedDict, total=False):
 # 이 카테고리 skill 이 포함된 플랜은 실행 후 홈 복귀 대상이다.
 _HOME_RETURN_CATEGORIES = {"social", "posture"}
 
-# look:* 같은 시선 명령만 있을 때는 홈 복귀를 하지 않는다.
-_LOOK_ONLY_PREFIXES = ("look:",)
+# LOOK|* 같은 시선 명령만 있을 때는 홈 복귀를 하지 않는다.
+_LOOK_ONLY_PREFIXES = ("LOOK|",)
 
 
 def _infer_plan_type(validated_plan: "ValidatedPlan", classifier_intent: str) -> str:
@@ -140,9 +139,9 @@ def _infer_plan_type(validated_plan: "ValidatedPlan", classifier_intent: str) ->
     if not cmds:
         return "chat" if classifier_intent in ("chat", "status_question") else "none"
 
-    has_play = any(c.startswith("p:") or c == "r" for c in cmds)
-    has_stop = any(c == "pause" for c in cmds)
-    has_move = any(c.startswith("move:") or c.startswith("gesture:") for c in cmds)
+    has_play = any(c.startswith("PLAY|") for c in cmds)
+    has_stop = any(c in ("PAUSE", "RESUME") or c.startswith("PLAY_CTRL|") for c in cmds)
+    has_move = any(c.startswith(("MOVE|", "GESTURE|", "POSE|", "HIT|")) for c in cmds)
     has_look_only = all(c.startswith(_LOOK_ONLY_PREFIXES) for c in cmds)
 
     if has_play:
@@ -158,45 +157,24 @@ def _infer_plan_type(validated_plan: "ValidatedPlan", classifier_intent: str) ->
 
 
 def _extract_commands(validated_plan: "ValidatedPlan") -> List[str]:
-    """play_modifier 를 포함한 전체 전송 명령 목록을 만든다."""
-    cmds: List[str] = []
-
-    modifier = getattr(validated_plan, "play_modifier", None)
-    if modifier is not None:
-        if getattr(modifier, "tempo_scale", 1.0) != 1.0:
-            cmds.append(f"tempo_scale:{modifier.tempo_scale:.2f}")
-        if getattr(modifier, "velocity_delta", 0) != 0:
-            cmds.append(f"velocity_delta:{modifier.velocity_delta}")
-
-    cmds.extend(list(getattr(validated_plan, "valid_op_cmds", []) or []))
-    return cmds
-
-
-def _play_modifier_to_dict(validated_plan: "ValidatedPlan") -> Dict:
-    modifier = getattr(validated_plan, "play_modifier", None)
-    if modifier is None:
-        return {}
-    return {
-        "tempo_scale": getattr(modifier, "tempo_scale", 1.0),
-        "velocity_delta": getattr(modifier, "velocity_delta", 0),
-        "source": getattr(modifier, "source", None),
-        "apply_scope": getattr(modifier, "apply_scope", None),
-    }
+    """전송할 명령 목록을 만든다. (사전 속도 modifier 폐기 — 검증 통과 명령이 전부다)"""
+    return list(getattr(validated_plan, "valid_op_cmds", []) or [])
 
 
 # ------------------------------------------------------------------
 # Step 빌더 — 클로저로 외부 의존성(session getter, 모델명 등)을 주입한다.
 # ------------------------------------------------------------------
 
-def make_preprocess_step():
+def make_preprocess_step(get_state_fn: Callable):
     """
-    preprocess: prefilter(pause/resume/인사).
+    preprocess: prefilter(연주 제어 pause/stop/speed/resume + 인사).
     맞으면 classifier 호출 없이 planner_output 을 채우고 `_shortcut=True` 로 표시한다.
-    (이전 실행 인터럽트는 wait 제거로 불필요해 삭제. clarification 합치기는 폐기 —
-     cross-turn 이어가기는 phil_brain + session 의 recovery 가 담당한다.)
+    연주 제어는 현재 상태(PLAYING 여부, play_speed)에 의존하므로 스냅샷을 여기서도 읽는다.
+    (planner 용 fresh fetch 는 여전히 state step 이 담당한다.)
     """
     def preprocess(state: PhilState) -> PhilState:
-        prefilter = build_prefilter_plan(state["user_text"])
+        robot_state = adapt_robot_state(get_state_fn())
+        prefilter = build_prefilter_plan(state["user_text"], robot_state)
         if prefilter is None:
             return state
 
@@ -363,7 +341,6 @@ def make_validator_step():
             "speech": validated.speech or "",
             "commands": commands,
             "plan_type": plan_type,
-            "play_modifier": _play_modifier_to_dict(validated),
             "repair_hint": repair_hint,
         }
 
@@ -389,9 +366,11 @@ def make_fallback_step():
 
 def home(bot, get_state_fn: Callable) -> None:
     """
-    동작 완료(is_fixed=True) 감지 후 홈 복귀 'h' 를 보내는 데몬 스레드를 띄우고 즉시 반환한다.
-    스레드 본체 _watch 를 안에 두어 "스레드 생성 + 움직임 감지"를 한 함수로 묶는다.
-    fire-and-forget 데몬이라 Thread 객체는 따로 보관하지 않는다(join/cancel 불필요).
+    [현재 비활성 — 런타임에서 호출하지 않는다]
+    구 DrumRobot2 의 is_fixed(움직임 중 플래그) 폴링 기반 홈 복귀 워처.
+    신 서버 GET_STATUS 에는 "움직이는 중" 신호가 없어 감지가 성립하지 않는다
+    (state 는 MOVE/GESTURE 중에도 IDLE 유지). 제스처 후 홈 복귀가 필요해지면
+    서버 상태 노출 또는 시간 기반으로 재설계한다.
     """
     def _watch():
         # 1. 움직임 시작 대기 (is_fixed=False, 최대 1.5초). 미감지면 홈 복귀 건너뜀.
@@ -416,7 +395,7 @@ def home(bot, get_state_fn: Callable) -> None:
         # 3. 홈 복귀 전송
         print("[Executor] 동작 완료 확인 → 홈 자세로 복귀")
         try:
-            bot.send_command("h\n")
+            bot.send_command("POSE|home")
         except Exception as exc:
             print(f"⚠️ 홈 복귀 명령 전송 실패: {exc}")
 
@@ -426,19 +405,16 @@ def home(bot, get_state_fn: Callable) -> None:
 def make_execute_step(executor: Executor, bot, get_state_fn: Callable):
     """
     execute: 로봇 명령을 Executor 로 비동기 전송한다.
-    on_done 콜백은 plan_type 이 motion 일 때 Home Watcher 를 띄운다.
-    (전송 완료 시점이 아니라 is_fixed=True 확인 후 'h' 전송)
+    Home Watcher 는 신 서버에서 감지 신호(is_fixed)가 없어 비활성 상태다 — home() 주석 참조.
     """
     def execute(state: PhilState) -> PhilState:
         commands = state.get("commands", [])
-        plan_type = state.get("plan_type", "none")
 
         if not commands:
             return state
 
         def on_done():
-            if plan_type == "motion":
-                home(bot, get_state_fn)
+            pass  # 홈 복귀 워처 비활성 (재설계 전까지)
 
         executor.exec_cmd(commands=commands, on_done=on_done)
         return state
@@ -465,7 +441,7 @@ def build_run_turn(
     get_state_fn: () -> dict — 현재 로봇 상태 스냅샷. state step 의 fresh fetch 와
                                홈 복귀 타이밍 폴링에 쓴다.
     """
-    preprocess = make_preprocess_step()
+    preprocess = make_preprocess_step(get_state_fn)
     classify = make_classify_step(classifier_model)
     fetch_state = make_state_step(get_state_fn)
     direct_answer = make_direct_answer_step()
