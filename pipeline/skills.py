@@ -167,11 +167,6 @@ SKILL_LIBRARY: Dict[str, Dict[str, object]] = {
 }
 
 
-def list_skill_names() -> List[str]:
-    """프롬프트에 노출할 수 있는 skill 이름 목록을 반환한다."""
-    return sorted(SKILL_LIBRARY.keys())
-
-
 def describe_skills_for_prompt() -> str:
     """planner 프롬프트에 넣기 쉬운 skill 카탈로그 문자열을 만든다."""
     lines: List[str] = []

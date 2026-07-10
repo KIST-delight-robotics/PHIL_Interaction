@@ -18,6 +18,7 @@ phil_robot/
 ├── eval/
 ├── pipeline/
 ├── runtime/
+├── runtime_log/
 ├── tests/
 └── third_party/
 ```
@@ -87,6 +88,9 @@ LLM 제어 파이프라인의 핵심 로직을 모은 계층이다.
 - `phil_client.py` — robot TCP client + state recv thread (updates `ROBOT_STATE`)
 - `mic_listener.py` — VAD utterance capture thread (`MicListener`)
 - `melo_engine.py` — MeloTTS wrapper
+- `console_log.py` — output split layer: redirects stdout/stderr to
+  `runtime_log/brainlog_*.txt` and keeps only `console()`/`console_input()`
+  conversation lines on the terminal (`runtime_log/` is a git-ignored artifact dir)
 
 구분 기준:
 

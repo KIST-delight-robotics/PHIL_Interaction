@@ -55,7 +55,7 @@
 | `PLAY\|<id>` | 곡 연주. id ∈ `{BI, BF, DS, TI, TY, WS}` (`config/play_list.json`). IDLE 전용. 시작 시 speed 1.0 리셋 |
 | `PAUSE` | 일시정지 + 재개 지점(곡 id, 마디) 저장. PLAYING 전용 |
 | `RESUME` | 저장된 재개 지점부터 재개(오디오 무음). IDLE + pause_point 필요 |
-| `PLAY_CTRL\|stop` | 연주 중지, 재개 지점 폐기. PLAYING 전용 |
+| `PLAY_CTRL\|stop` | 연주 중지, 재개 지점 폐기. PLAYING 전용. **brain 미사용** — 멈춤은 전부 `PAUSE` 로 보낸다(2026-07-10 결정, 서버 지원은 유지) |
 | `PLAY_CTRL\|speed\|<x>` | 연주 속도 배율(0.5~2.0 서버 클램프). PLAYING 전용 |
 | `POSE\|<name>` | 사전 정의 포즈. name ∈ `{init, home, ready, shutdown}`. IDLE 전용 |
 | `MOVE\|<joint>\|<deg>\|...\|<move_time>` | 관절 절대각(도) 다중 쌍 + 이동시간(생략 시 서버 기본 3.0s). IDLE 전용 |

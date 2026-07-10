@@ -6,7 +6,7 @@ speech 와 skill/command plan 만 생성한다.
 """
 
 import json
-from typing import Dict, List, Set
+from typing import Dict, Optional, Set
 
 from .failure import FALLBACK_MESSAGE, build_planner_failure_result, sanitize_message
 from .state_adapter import build_planner_state_summary
@@ -28,17 +28,20 @@ PLANNER_DOMAIN_CHAT = "chat"
 PLANNER_DOMAIN_MOTION = "motion"
 PLANNER_DOMAIN_PLAY = "play"
 PLANNER_DOMAIN_STATUS = "status"
-PLANNER_DOMAIN_STOP = "stop"
+PLANNER_DOMAIN_CTRL = "ctrl"
 # repair 는 intent 로부터 선택되지 않는다. validator 가 명령을 거부했을 때
 # repair 루프가 도메인을 이 값으로 강제하고 repair_hint 를 함께 넘긴다.
 PLANNER_DOMAIN_REPAIR = "repair"
+# notify 도 intent 로부터 선택되지 않는다. prefilter 가 연주 제어(정지/일시정지/재개/속도)를
+# rule-base 로 판정·전송한 뒤, 그 결과(play_ctrl)를 사용자에게 들려줄 대사만 생성한다.
+PLANNER_DOMAIN_NOTIFY = "notify"
 
 INTENT_TO_DOMAIN = {
     "chat": PLANNER_DOMAIN_CHAT,
     "motion_request": PLANNER_DOMAIN_MOTION,
     "play_request": PLANNER_DOMAIN_PLAY,
     "status_question": PLANNER_DOMAIN_STATUS,
-    "stop_request": PLANNER_DOMAIN_STOP,
+    "ctrl_request": PLANNER_DOMAIN_CTRL,
     "unknown": PLANNER_DOMAIN_DEFAULT,
 }
 
@@ -49,9 +52,9 @@ DOMAIN_ALLOWED_SKILL_CATEGORIES: Dict[str, Set[str]] = {
     # 서버 PLAY 가 준비 자세를 내부 처리하므로 play 카테고리만 허용한다.
     PLANNER_DOMAIN_PLAY: {"play"},
     PLANNER_DOMAIN_STATUS: set(),
-    # stop 도메인에서 posture 를 빼 ready_pose 유출을 막는다 (홈 복귀는 POSE|home 직접 명령).
-    PLANNER_DOMAIN_STOP: {"system"},
+    PLANNER_DOMAIN_CTRL: {"system"},
     PLANNER_DOMAIN_REPAIR: set(),
+    PLANNER_DOMAIN_NOTIFY: set(),
     PLANNER_DOMAIN_DEFAULT: {"social", "visual", "posture", "play", "system"},
 }
 
@@ -84,14 +87,11 @@ DOMAIN_INSTRUCTIONS = {
 - 이름, 정체, 자기소개를 묻는 질문이 들어오면 현재 상태 설명보다 필의 정체성을 우선 소개한다.
 - robot_state 에 직접 보이는 근거만 설명하고, current_song/progress 만으로 지금 연주 중이라고 추측하지 않는다. can_move=false 이고 busy=false 면 안전 키 상태를 먼저 설명한다.
 - 사과, 설명, 안내를 명확하게 하되 장황하게 늘어놓지 않는다.""",
-    PLANNER_DOMAIN_STOP: """당신은 stop/resume planner 다.
-- 멈춤, 정지, 종료, 홈 자세 복귀, 연주 재개, 연주 속도 조절 요청에 집중한다.
-- 일시정지(멈춰, 잠깐, 일시정지)는 op_cmd 에 "PAUSE" — 나중에 멈춘 곳부터 이어서 연주할 수 있다.
-- 완전 중지(그만, 정지, 중지, 스톱)는 op_cmd 에 "PLAY_CTRL|stop" — 재개 지점이 사라진다.
+    PLANNER_DOMAIN_CTRL: """당신은 control planner 다.
+- 멈춤, 정지, 종료, 연주 재개, 연주 속도 조절 요청에 집중한다.
+- 멈춤·정지·중지·일시정지 요청은 전부 op_cmd 에 "PAUSE" 를 사용한다 — 나중에 멈춘 곳부터 이어서 연주할 수 있다.
 - 연주 재개(다시 해, 계속 해, 이어서 해) 요청에는 op_cmd 에 "RESUME" 을 사용한다.
 - 연주 중 속도 조절 요청에는 op_cmd 에 "PLAY_CTRL|speed|<배율>" 을 사용한다 (0.5~2.0, 예: PLAY_CTRL|speed|1.20).
-- 홈 복귀는 "POSE|home" 을 사용한다.
-- 연주 시작 요청은 이 도메인의 일이 아니다. 준비 자세(ready_pose)나 연주 명령을 만들지 않는다.
 - speech 는 짧고 명확하게 현재 중단/재개 의도를 전달한다.
 - unrelated motion 이나 social skill 은 넣지 않는다.""",
     PLANNER_DOMAIN_DEFAULT: """당신은 generic planner 다.
@@ -104,6 +104,17 @@ DOMAIN_INSTRUCTIONS = {
 - 동작을 다시 계획하지 말고, repair_hint 의 이유를 사용자에게 짧고 자연스럽게 설명하거나 되묻는다.
 - skills 와 op_cmd 는 반드시 [] 로 둔다. t(speech) 만 채운다.
 - t 는 사용자에게 그대로 들려줄 완성된 한국어 문장이다. repair_hint 문구를 옮겨 적지 말고 사람이 말하듯 바꾼다.""",
+    PLANNER_DOMAIN_NOTIFY: """당신은 notify planner 다.
+- 연주 제어(정지/일시정지/재개/속도)는 이미 규칙 기반으로 판정돼 로봇에 전송까지 끝났다.
+  그 결과가 입력의 play_ctrl 에 있다. 새 동작을 계획하지 말고 결과를 알리는 대사만 만든다.
+- skills 와 op_cmd 는 반드시 [] 로 둔다. t(speech) 만 채운다.
+- t 는 play_ctrl 내용을 사용자에게 들려줄 짧고 자연스러운 한국어 한두 문장이다.
+- executed 가 false 면 왜 실행되지 않았는지(result 참고: 연주 중 아님/이미 연주 중)를 안내한다.
+- action 이 speed 면 speed_from 에서 speed_to 로 바뀐다고 말한다.
+  result 가 at_limit 이면 이미 한계 속도라고, unchanged 면 이미 그 속도로 연주 중이라고 안내한다.
+  speed_req 가 있으면 요청 배속이 허용 범위를 벗어나 speed_to 로 맞췄다고 안내한다.
+- action 이 pause 면 멈추되 이어서 재개할 수 있음을, resume 이면 멈춘 부분부터 이어감을 자연스럽게 담는다.
+- song_label 이 있으면 곡 이름을 함께 언급해도 좋다.""",
 }
 
 PLANNER_SHARED_RULES = f"""반드시 JSON 객체 하나만 출력한다. 설명문, 코드블록, 마크다운은 절대 출력하지 않는다.
@@ -114,6 +125,7 @@ planner 입력에는 다음 정보가 함께 들어온다.
 - needs_motion: 실제 동작이 필요한 요청인지 여부
 - user_text: 사용자 발화
 - repair_hint: (repair 도메인에서만) 직전 시도가 validator 에서 거부된 이유
+- play_ctrl: (notify 도메인에서만) 이미 실행된 연주 제어의 내용과 결과
 
 공통 규칙:
 - 당신의 이름은 필(Phil)이며, KIST에서 개발된 지능형 휴머노이드 드럼 로봇이다.
@@ -135,7 +147,6 @@ planner 입력에는 다음 정보가 함께 들어온다.
 - POSE|ready
 - POSE|home
 - PAUSE
-- PLAY_CTRL|stop
 - RESUME
 - PLAY_CTRL|speed|1.20
 - LOOK|30|0
@@ -183,13 +194,15 @@ def build_planner_input(
     user_text: str,
     classifier_output: Dict,
     planner_domain: str,
-    session_summary: Dict = None,
-    repair_hint: Dict = None,
+    session_summary: Optional[Dict] = None,
+    repair_hint: Optional[Dict] = None,
+    play_ctrl: Optional[Dict] = None,
 ) -> str:
     """
     planner 에 넘길 입력 JSON 문자열을 만든다.
     session_summary 가 있으면 최근 대화 히스토리와 마지막 동작 상태를 포함한다.
     repair_hint 가 있으면(repair 도메인 호출) 직전 거부 사유를 포함한다.
+    play_ctrl 이 있으면(notify 도메인 호출) 이미 실행된 연주 제어 내용을 포함한다.
     """
     state_summary = build_planner_state_summary(robot_state)
     needs_motion = bool(classifier_output.get("needs_motion", False))
@@ -209,6 +222,10 @@ def build_planner_input(
     # repair 도메인 호출이면 직전 거부 사유를 실어 planner 가 설명/되묻게 한다.
     if repair_hint:
         payload["repair_hint"] = repair_hint
+
+    # notify 도메인 호출이면 이미 실행된 연주 제어 내용을 실어 대사만 만들게 한다.
+    if play_ctrl:
+        payload["play_ctrl"] = play_ctrl
 
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -295,8 +312,9 @@ def enforce_intent_constraints(planner_output: Dict, classifier_output: Dict) ->
         normalized["op_cmd"] = [
             command for command in normalized["op_cmd"] if command.startswith(allowed_prefixes)
         ]
-    elif intent == "stop_request":
-        allowed_prefixes = ("PAUSE", "RESUME", "PLAY_CTRL|", "POSE|home")
+    elif intent == "ctrl_request":
+        # ctrl 도메인 책임 = 멈춤/재개/속도. 홈 복귀는 motion 도메인 몫이다.
+        allowed_prefixes = ("PAUSE", "RESUME", "PLAY_CTRL|speed")
         normalized["op_cmd"] = [
             command for command in normalized["op_cmd"] if command.startswith(allowed_prefixes)
         ]

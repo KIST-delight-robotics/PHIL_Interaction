@@ -2,28 +2,22 @@ import json
 import re
 
 from .failure import build_classifier_failure_result
+from .songs import SONG_ALIAS_KEYWORDS
 from .state_adapter import (
     detect_joint_angle_query,
     detect_repertoire_query,
     detect_song_request_code,
 )
 
-# config 는 패키지 깊이에 따라 경로가 달라 fallback 을 유지한다.
-# (phil_brain 모드: pipeline 이 top-level → 'config' / eval·tests 모드: phil_robot.pipeline → '..config')
-try:
-    from ..config import CLASSIFIER_MODEL
-except (ImportError, ValueError):
-    from config import CLASSIFIER_MODEL
-
 DEFAULT_INTENT_RESULT = build_classifier_failure_result()
 
-MOTION_REQUIRED_INTENTS = {"motion_request", "play_request", "stop_request"}
+MOTION_REQUIRED_INTENTS = {"motion_request", "play_request", "ctrl_request"}
 INTENT_CODE_MAP = {
     "C": "chat",
     "M": "motion_request",
     "P": "play_request",
     "Q": "status_question",
-    "X": "stop_request",
+    "X": "ctrl_request",
     "U": "unknown",
 }
 IDENTITY_CHAT_KEYWORDS = ["이름", "누구", "정체", "자기소개"]
@@ -40,25 +34,8 @@ PLAY_ACTION_KEYWORDS = [
     "시작해",
     "시작해줘",
 ]
-PLAY_SONG_KEYWORDS = [
-    "this is me",
-    "디스 이즈 미",
-    "디스이즈미",
-    "그대에게",
-    "baby i need you",
-    "베이비 아이 니드 유",
-    "필인",
-    "드럼 솔로",
-    "드럼솔로",
-    "drum solo",
-    "왜그래",
-    "왜 그래",
-    "why so",
-    "tim",
-    "bi",
-]
-# 곡 제목 승격을 막는 정지/일시정지 신호 — "그대에게 그만 틀어" 같은 발화 보호용
-PLAY_STOP_GUARDS = ["그만", "멈춰", "중지", "정지", "일시정지", "스톱"]
+# 곡 제목 포함 여부 검사용 — songs.py 별칭 평탄화 파생 (구 하드코딩 목록 대체)
+PLAY_SONG_KEYWORDS = SONG_ALIAS_KEYWORDS
 READY_POSE_TEXTS = {
     "준비",
     "준비해",
@@ -109,7 +86,7 @@ CLASSIFIER_SYSTEM_PROMPT = """당신은 로봇 에이전트의 1차 intent class
   - M = motion_request
   - P = play_request
   - Q = status_question
-  - X = stop_request
+  - X = ctrl_request
   - U = unknown
 - m: motion 필요 여부. 1 또는 0 만 사용한다.
 
@@ -118,7 +95,7 @@ CLASSIFIER_SYSTEM_PROMPT = """당신은 로봇 에이전트의 1차 intent class
 - motion_request: 손/팔/허리/손목/시선/제스처 등 물리 동작 요청
 - play_request: 연주 시작/곡 재생/드럼 연주 요청
 - status_question: 현재 상태, 직전 행동, 왜 멈췄는지, 무엇을 했는지 질문
-- stop_request: 멈춰, 그만, 정지, 종료, 일시정지, 잠깐, 스톱 요청 또는 연주 재개(다시 해, 계속 해, 이어서 해) 요청
+- ctrl_request: 연주 제어 요청 — 일시정지(멈춰, 그만, 정지, 스톱), 연주 재개(다시 해, 계속 해, 이어서 해), 연주 속도 조절(더 빨리, 천천히)
 - unknown: 의도를 분명히 정할 수 없는 경우
 
 판단 규칙:
@@ -274,11 +251,9 @@ def normalize_intent_result(intent_result, user_text):
         result["needs_motion"] = True
 
     # 곡 제목 + 연주 동사가 함께 있으면 classifier 오분류와 무관하게 play 로 승격한다.
-    # ("왜 그래 연주해줘"가 stop_request 로 새던 케이스 보정. 정지어가 있으면 승격하지 않는다.)
     if (
         detect_song_request_code(normalized_text) is not None
         and any(keyword in normalized_text for keyword in PLAY_ACTION_KEYWORDS)
-        and not any(keyword in normalized_text for keyword in PLAY_STOP_GUARDS)
     ):
         result["intent"] = "play_request"
         result["needs_motion"] = True

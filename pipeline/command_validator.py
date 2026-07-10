@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import List
 
+from .songs import SONG_CODES
+
 # 관절 한계 — Phil-drum-robot config/motors.json 과 동일 (drumrobot_client/main.py JOINTS 표)
 JOINT_LIMITS = {
     "waist": (-90.0, 90.0),
@@ -18,8 +20,8 @@ JOINT_LIMITS = {
     "head_pitch": (-100.0, 90.0),
 }
 
-# Phil-drum-robot config/play_list.json 의 곡 id
-PLAY_CODES = {"TI", "TY", "BI", "BF", "DS", "WS"}
+# 곡 코드 검증용 set — songs.py 파생
+PLAY_CODES = set(SONG_CODES)
 GESTURES = {"hi", "nod", "shake", "wave", "hurray", "happy"}
 POSES = {"init", "home", "ready", "shutdown"}
 # 연주 속도 배율 허용 범위 — 서버 PLAY_CTRL|speed 클램프와 동일
@@ -28,25 +30,6 @@ SPEED_SCALE_MAX = 2.0
 # LOOK 범위 — head_yaw / head_pitch 한계 (정면 0도)
 LOOK_PAN_MIN, LOOK_PAN_MAX = JOINT_LIMITS["head_yaw"]
 LOOK_TILT_MIN, LOOK_TILT_MAX = JOINT_LIMITS["head_pitch"]
-
-MOTION_KEYWORDS = [
-    "손",
-    "팔",
-    "허리",
-    "손목",
-    "발",
-    "움직",
-    "들어",
-    "들어줘",
-    "돌려",
-    "봐",
-    "고개",
-    "인사",
-    "흔들",
-    "만세",
-    "연주",
-    "쳐",
-]
 
 
 @dataclass
@@ -129,7 +112,7 @@ def validate_playing_only(command, robot_state):
 
 
 def validate_play_ctrl_command(command, robot_state):
-    """PLAY_CTRL|stop / PLAY_CTRL|speed|<배율> — 연주 중 제어."""
+    """PLAY_CTRL|speed|<배율> — 연주 중 제어."""
     allowed, reason = validate_playing_only(command, robot_state)
     if not allowed:
         return False, reason
@@ -137,9 +120,6 @@ def validate_play_ctrl_command(command, robot_state):
     args = _split_args(command)
     if not args:
         return False, f"PLAY_CTRL 명령 파싱 실패: {command}"
-
-    if args[0] == "stop":
-        return True, ""
 
     if args[0] == "speed":
         if len(args) < 2:
@@ -305,12 +285,6 @@ def validate_sequence_rules(commands):
             break
 
     return warnings
-
-
-def user_text_requests_motion(user_text):
-    """아주 가벼운 규칙 기반 감지기로 물리 동작 요청을 추정한다."""
-    normalized_text = (user_text or "").strip()
-    return any(keyword in normalized_text for keyword in MOTION_KEYWORDS)
 
 
 def has_actionable_motion_command(commands):

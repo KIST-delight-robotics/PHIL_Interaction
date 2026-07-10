@@ -13,10 +13,11 @@ Phil-drum-robot 서버(TCP 1951, `|` opcode 프로토콜)용 클라이언트.
 import socket
 import time
 import threading
-import json
 import copy
 
 from typing import Dict, Optional
+
+from .console_log import console, console_input, take_cmd_flag
 
 ANGLE_UPDATE_DEADBAND_DEG = 0.2
 ANGLE_LOG_DEADBAND_DEG = 0.5
@@ -73,11 +74,6 @@ ROBOT_STATE = {
     },
 }
 STATE_LOCK = threading.Lock()
-
-
-def get_robot_state_json():
-    """현재 로봇 상태를 LLM 프롬프트용 JSON 문자열로 반환"""
-    return json.dumps(get_robot_state_snapshot(), ensure_ascii=False)
 
 
 def get_robot_state_snapshot():
@@ -194,6 +190,44 @@ def _state_changed_meaningfully(previous_state, current_state):
     return False
 
 
+def _brief_state_line(previous_state, current_state):
+    """터미널용 상태 요약 1줄. 전체 dict 는 로그에만 남기고 무엇이 변했는지만 추린다."""
+    previous_state = previous_state or {}
+
+    prev_str = previous_state.get("state_str")
+    curr_str = current_state.get("state_str", "?")
+    if prev_str and prev_str != curr_str:
+        line = f" 상태: {prev_str} → {curr_str}"
+    else:
+        line = f" 상태: {curr_str}"
+
+    current_song = current_state.get("current_song", "None")
+    if current_song and current_song != "None":
+        line += f" | 곡: {current_song}"
+
+    play_speed = current_state.get("play_speed", 1.0)
+    if isinstance(play_speed, (int, float)) and abs(play_speed - 1.0) > 1e-6:
+        line += f" | 속도: {play_speed:.2f}x"
+
+    # MOVE/POSE 처럼 관절이 움직인 경우엔 어느 관절이 몇 도로 갔는지가 핵심이다.
+    previous_angles = previous_state.get("current_angles", {})
+    current_angles = current_state.get("current_angles", {})
+    moved_joints = []
+    for joint_name in JOINT_ORDER:
+        prev_deg = previous_angles.get(joint_name)
+        curr_deg = current_angles.get(joint_name)
+        if (
+            isinstance(prev_deg, (int, float))
+            and isinstance(curr_deg, (int, float))
+            and abs(float(curr_deg) - float(prev_deg)) >= ANGLE_LOG_DEADBAND_DEG
+        ):
+            moved_joints.append(f"{joint_name} {float(prev_deg):.0f}→{float(curr_deg):.0f}°")
+    if moved_joints:
+        line += " | " + ", ".join(moved_joints)
+
+    return line
+
+
 class RobotClient:
 
     # 클라이언트 소켓 생성자
@@ -210,7 +244,7 @@ class RobotClient:
     # 소켓 연결
     def connect(self):
         """로봇(C++) 서버에 연결될 때까지 재시도 후 START/READY 핸드셰이크 진행"""
-        print(f"로봇 서버 ({self.host}:{self.port})에 연결 시도..")
+        console(f"로봇 서버 ({self.host}:{self.port})에 연결 시도..")
 
         while True:
             try:
@@ -218,12 +252,12 @@ class RobotClient:
                 self.sock.settimeout(5)  # 타임아웃 5초 설정
                 self.sock.connect((self.host, self.port))
                 self.sock.settimeout(None)
-                print(f"로봇 서버 ({self.host}:{self.port})에 연결되었습니다.")
+                console(f"로봇 서버 ({self.host}:{self.port})에 연결되었습니다.")
                 break
 
             except (socket.error, ConnectionRefusedError):
                 self.sock.close()
-                print("⏳ 로봇 서버 대기 중... (drumrobot_server 를 먼저 실행해주세요)")
+                console("⏳ 로봇 서버 대기 중... (drumrobot_server 를 먼저 실행해주세요)")
                 time.sleep(3)
 
         self._handshake()
@@ -232,20 +266,20 @@ class RobotClient:
 
     def _handshake(self):
         """서버 시작 절차: START -> (고정 키 제거) -> READY. 키보드로 진행한다."""
-        while input("'start'를 입력하세요 > ").strip().lower() != "start":
-            print("  start 를 입력해야 합니다.")
+        while console_input("'start'를 입력하세요 > ").strip().lower() != "start":
+            console("  start 를 입력해야 합니다.")
         self._send_line("START")
 
-        while input("고정 키를 모두 제거한 후 'ready'를 입력하세요 > ").strip().lower() != "ready":
-            print("  ready 를 입력해야 합니다.")
+        while console_input("고정 키를 모두 제거한 후 'ready'를 입력하세요 > ").strip().lower() != "ready":
+            console("  ready 를 입력해야 합니다.")
         self._send_line("READY")
-        print("✅ 로봇 준비 완료 (IDLE). 이제 음성으로 명령할 수 있습니다.")
+        console("✅ 로봇 준비 완료 (IDLE). 이제 음성으로 명령할 수 있습니다.")
 
     # 상태 조회 (on-demand)
     def fetch_state_snapshot(self):
         """
         GET_STATUS 를 1회 요청해 ROBOT_STATE 를 갱신하고 스냅샷을 반환한다.
-        run_turn 의 preprocess/state step 이 턴 시작 시점에 호출한다 (배경 폴링 없음).
+        run_turn 의 preprocess step 이 턴 시작 시점에 1회 호출한다 (배경 폴링 없음).
         실패 시 마지막으로 알고 있던 스냅샷을 그대로 반환한다.
         """
         global ROBOT_STATE
@@ -283,10 +317,14 @@ class RobotClient:
             ROBOT_STATE.update(status_update)
             current_snapshot = copy.deepcopy(ROBOT_STATE)
 
-        # 이전과 다르게 바뀐 경우에만 상태 갱신 메시지 출력
+        # 이전과 다르게 바뀐 경우에만 상태 갱신 메시지 출력 (전체 dict 는 로그 전용)
         if _state_changed_meaningfully(self._last_printed, current_snapshot):
             print(f"\n[상태 갱신] {current_snapshot}")
+            previous_printed = self._last_printed
             self._last_printed = current_snapshot
+            # LLM 명령 전송 이후 처음 감지된 변화 1회만 터미널에 요약해 보여준다.
+            if take_cmd_flag():
+                console(_brief_state_line(previous_printed, current_snapshot))
 
         return current_snapshot
 

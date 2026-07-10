@@ -16,6 +16,9 @@ third_party/downloads_whl/
 artifacts/
 **/*.log
 
+# 실행 콘솔 로그 (runtime/console_log.py 가 생성)
+runtime_log/
+
 # 로컬 전용 — 에이전트는 디스크에서 읽되 원격엔 올리지 않는다
 AGENTS.md
 CLAUDE.md

@@ -1,3 +1,4 @@
+import re
 import time
 from typing import Dict, Optional, Tuple
 
@@ -11,6 +12,7 @@ from .intent_classifier import (
 # JSON 형식 LLM 호출 공통 래퍼
 from .llm_interface import call_json_llm
 from .planner import (
+    PLANNER_DOMAIN_CTRL,           # 연주 제어 도메인 (prefilter shortcut 이 사용)
     build_planner_input,           # planner 입력 JSON 생성
     enforce_intent_constraints,         # planner 결과를 intent/domain 기준으로 한 번 더 정리
     get_planner_system_prompt,          # domain별 planner system prompt 생성
@@ -31,6 +33,9 @@ from .state_adapter import (
 # planner input 에 넣을 session 요약
 from .session import build_session_summary
 
+# 곡 코드 → 표시명 (notify 대사 재료)
+from .songs import SONG_LABELS
+
 # config 는 패키지 깊이에 따라 경로가 달라 fallback 을 유지한다.
 # (phil_brain 모드: pipeline 이 top-level → 'config' / eval·tests 모드: phil_robot.pipeline → '..config')
 try:
@@ -48,72 +53,162 @@ def _is_greeting_wave(user_text: str) -> bool:
     return "안녕" in user_text and "반가워" in user_text
 
 
-# 일시정지(재개 가능)와 중지(재개 지점 폐기)는 다른 명령이다 — 신 서버 PAUSE / PLAY_CTRL|stop.
-# "일시정지"가 "정지"를 부분 문자열로 포함하므로 pause 키워드를 먼저 검사한다.
-_PAUSE_KEYWORDS = {"멈춰", "멈춰봐", "잠깐", "일시정지", "일시 정지", "pause"}
-_STOP_KEYWORDS = {"그만", "정지", "중지", "꺼줘", "꺼버려", "스톱", "stop"}
+# 멈춤 계열(멈춰/그만/정지/스톱...)은 전부 PAUSE 하나로 보낸다.
+# 재개 지점은 항상 저장돼 "그만해" 후 "다시 틀어줘"도 이어서 재생된다 (2026-07-10 결정, CONTRACTS.md 참조).
+_PAUSE_KEYWORDS = {
+    "멈춰", "멈춰봐", "잠깐", "일시정지", "일시 정지", "pause",
+    "그만", "정지", "중지", "꺼줘", "꺼버려", "스톱", "stop",
+}
 _RESUME_KEYWORDS = {"다시", "계속", "이어서", "재개", "resume"}
-_SPEED_UP_KEYWORDS = {"빨리", "빠르게", "속도 올려", "템포 올려"}
-_SPEED_DOWN_KEYWORDS = {"천천히", "느리게", "속도 내려", "템포 내려"}
+_SPEED_UP_KEYWORDS = {"빨리", "빠르게"}
+_SPEED_DOWN_KEYWORDS = {"천천히", "느리게"}
+
+# "속도를 줄여줘"/"속도 늘려줘"처럼 조사·동사 변형이 끼면 고정 문구 매칭이 놓친다.
+# 속도 명사 + 방향 동사가 함께 있으면 방향을 판정한다.
+# ("소리 줄여줘", "팔 내려" 같은 발화는 속도 명사가 없어 여기 걸리지 않는다.)
+_SPEED_NOUNS = ("속도", "템포", "빠르기")
+_SPEED_UP_VERBS = ("올려", "높여", "늘려", "키워")
+_SPEED_DOWN_VERBS = ("내려", "낮춰", "줄여")
 
 _SPEED_STEP = 0.1
 _SPEED_MIN = 0.5   # 서버 PLAY_CTRL|speed 클램프 범위와 동일
 _SPEED_MAX = 2.0
 
+# "원래 속도로", "정상 속도로" 같은 기본 배속(1.0) 복귀 발화.
+# 공백 제거 후 비교하므로 "원래속도로"도 걸린다.
+_SPEED_RESET_KEYWORDS = (
+    "원래속도", "원래템포", "원래빠르기", "원래대로",
+    "정상속도", "기본속도", "기본빠르기",
+)
 
-def _resolve_resume(user_text: str, robot_state: Dict) -> Optional[Tuple[list, str]]:
+# "1배속으로", "1.3배로", "0.8 속도로", "속도 0.8로" 같은 명시적 배속 지정.
+# 매칭 순서: 배/배속 표현 → 숫자+속도 → 속도+숫자.
+_SPEED_TARGET_PATTERNS = (
+    re.compile(r"(\d+(?:\.\d+)?)\s*배(?:속)?"),
+    re.compile(r"(\d+(?:\.\d+)?)\s*(?:의\s*)?속도"),
+    re.compile(r"속도\s*(?:를|는)?\s*(\d+(?:\.\d+)?)"),
+)
+
+
+def _current_song_label(robot_state: Dict) -> str:
+    """스냅샷의 곡 코드를 사용자 표시명으로 바꾼다. 없으면 'None'."""
+    song_code = robot_state.get("current_song", "None")
+    return SONG_LABELS.get(song_code, str(song_code))
+
+
+def _resolve_resume(user_text: str, robot_state: Dict) -> Optional[Tuple[list, str, Dict]]:
     """
     resume 발화를 해석한다. 재개 지점 유무 판단은 서버(RESUME 처리) 몫이다.
 
     반환값:
-        ([op_cmds], speech) — 빈 op_cmds 는 안내만 한다는 뜻
+        ([op_cmds], speech, play_ctrl) — 빈 op_cmds 는 안내만 한다는 뜻.
+        speech 는 notify LLM 실패 시 쓸 고정 fallback, play_ctrl 은 notify 대사 재료다.
         None — prefilter 를 포기하고 planner 로 넘긴다 (예: "그 노래 다시 틀어줘" 처음부터 재생)
     """
     if robot_state.get("state", 0) == 2:
-        return [], "이미 연주 중이에요."
+        play_ctrl = {
+            "action": "resume",
+            "executed": False,
+            "result": "already_playing",
+            "song_label": _current_song_label(robot_state),
+        }
+        return [], "이미 연주 중이에요.", play_ctrl
 
     # 곡을 지목했으면 재개가 아니라 그 곡 재생 요청으로 본다.
     if detect_song_request_code(user_text) is not None:
         return None
 
-    return ["RESUME"], "멈췄던 부분부터 이어서 연주할게요."
+    play_ctrl = {"action": "resume", "executed": True, "result": "ok"}
+    return ["RESUME"], "멈췄던 부분부터 이어서 연주할게요.", play_ctrl
 
 
-def _detect_play_control(user_text: str, robot_state: Dict) -> Optional[Tuple[list, str]]:
+def _parse_speed_target(text: str) -> Optional[float]:
+    """발화에서 명시적 배속 숫자를 찾는다. 없으면 None."""
+    condensed_text = text.replace(" ", "")
+    if any(kw in condensed_text for kw in _SPEED_RESET_KEYWORDS):
+        return 1.0
+    for pattern in _SPEED_TARGET_PATTERNS:
+        matched = pattern.search(text)
+        if matched:
+            return float(matched.group(1))
+    return None
+
+
+def _detect_speed_delta(text: str) -> float:
+    """발화에서 속도 조절 방향을 판정한다. 속도 발화가 아니면 0.0 을 돌려준다."""
+    if any(kw in text for kw in _SPEED_UP_KEYWORDS):
+        return _SPEED_STEP
+    if any(kw in text for kw in _SPEED_DOWN_KEYWORDS):
+        return -_SPEED_STEP
+    if any(noun in text for noun in _SPEED_NOUNS):
+        if any(verb in text for verb in _SPEED_UP_VERBS):
+            return _SPEED_STEP
+        if any(verb in text for verb in _SPEED_DOWN_VERBS):
+            return -_SPEED_STEP
+    return 0.0
+
+
+def _detect_play_control(user_text: str, robot_state: Dict) -> Optional[Tuple[list, str, Dict]]:
     """
-    연주 제어(pause/stop/speed/resume) 발화를 감지한다.
+    연주 제어(pause/speed/resume) 발화를 감지한다.
     LLM 없이 키워드 매칭 + 상태 스냅샷으로 직접 처리해 지연을 줄인다.
 
-    반환값: ([op_cmds], speech) 또는 None. 빈 op_cmds 는 안내만 한다는 뜻.
+    반환값: ([op_cmds], speech, play_ctrl) 또는 None. 빈 op_cmds 는 안내만 한다는 뜻.
+    speech 는 고정 fallback 대사, play_ctrl 은 notify LLM 이 대사를 만들 때 쓰는 재료다.
     """
     text = user_text.strip()
     is_playing = robot_state.get("state", 0) == 2
+    song_label = _current_song_label(robot_state)
 
     if any(kw in text for kw in _PAUSE_KEYWORDS):
         if not is_playing:
-            return [], "지금 연주 중인 곡이 없어요."
-        return ["PAUSE"], "잠깐 멈출게요. 이어서 하려면 다시 틀어달라고 말씀해 주세요."
-
-    if any(kw in text for kw in _STOP_KEYWORDS):
-        if not is_playing:
-            return [], "지금 연주 중인 곡이 없어요."
-        return ["PLAY_CTRL|stop"], "연주를 중지할게요."
+            play_ctrl = {"action": "pause", "executed": False, "result": "not_playing"}
+            return [], "지금 연주 중인 곡이 없어요.", play_ctrl
+        play_ctrl = {"action": "pause", "executed": True, "result": "ok", "song_label": song_label}
+        return ["PAUSE"], "잠깐 멈출게요. 이어서 하려면 다시 틀어달라고 말씀해 주세요.", play_ctrl
 
     # 속도 조절은 서버가 연주 중에만 받으므로 PLAYING 일 때만 감지한다.
     # (연주 시작 전 "빠르게 연주해줘"는 planner 로 흘러가 일반 연주 요청으로 처리된다.)
     if is_playing:
+        # 명시적 배속("1.3배로")이 있으면 그 값을, 없으면 방향 발화로 ±0.1 스텝을 쓴다.
+        requested_speed = _parse_speed_target(text)
         speed_delta = 0.0
-        if any(kw in text for kw in _SPEED_UP_KEYWORDS):
-            speed_delta = _SPEED_STEP
-        elif any(kw in text for kw in _SPEED_DOWN_KEYWORDS):
-            speed_delta = -_SPEED_STEP
+        if requested_speed is None:
+            speed_delta = _detect_speed_delta(text)
 
-        if speed_delta != 0.0:
+        if requested_speed is not None or speed_delta != 0.0:
             current_speed = robot_state.get("play_speed", 1.0)
             if not isinstance(current_speed, (int, float)):
                 current_speed = 1.0
-            target_speed = round(min(_SPEED_MAX, max(_SPEED_MIN, current_speed + speed_delta)), 2)
-            return [f"PLAY_CTRL|speed|{target_speed:.2f}"], f"연주 속도를 {target_speed:.1f}배로 조절할게요."
+            if requested_speed is not None:
+                target_speed = requested_speed
+            else:
+                target_speed = current_speed + speed_delta
+            target_speed = round(min(_SPEED_MAX, max(_SPEED_MIN, target_speed)), 2)
+
+            if target_speed != round(float(current_speed), 2):
+                speed_result = "ok"
+            elif requested_speed is not None:
+                speed_result = "unchanged"
+            else:
+                speed_result = "at_limit"
+
+            play_ctrl = {
+                "action": "speed",
+                "executed": True,
+                "result": speed_result,
+                "song_label": song_label,
+                "speed_from": round(float(current_speed), 2),
+                "speed_to": target_speed,
+            }
+            # 요청 배속이 허용 범위 밖이라 클램프됐으면 원래 요청값도 알려 준다.
+            if requested_speed is not None and round(requested_speed, 2) != target_speed:
+                play_ctrl["speed_req"] = round(requested_speed, 2)
+            return (
+                [f"PLAY_CTRL|speed|{target_speed:.2f}"],
+                f"연주 속도를 {target_speed:.1f}배로 조절할게요.",
+                play_ctrl,
+            )
 
     if any(kw in text for kw in _RESUME_KEYWORDS):
         return _resolve_resume(user_text, robot_state)
@@ -130,19 +225,21 @@ def build_prefilter_plan(user_text: str, robot_state: Dict) -> Optional[Tuple[Di
     여기서 만든 planner_output 은 이후 build_validated_plan() 이
     최신 robot_state 로 한 번 검증한다.
     """
-    # 연주 제어(pause/stop/speed/resume) 발화는 LLM latency 없이 즉시 처리한다.
+    # 연주 제어(pause/speed/resume) 발화는 LLM latency 없이 즉시 처리한다.
     # 상태와 맞지 않는 제어(IDLE 에서 멈춰, 재개 지점 없는 재개 등)는 빈 op_cmds + 안내만 나온다.
+    # speech 는 고정 fallback 이고, 명령 전송 뒤 notify LLM 이 play_ctrl 로 최종 대사를 만든다.
     play_control = _detect_play_control(user_text, robot_state)
     if play_control is not None:
-        op_cmds, control_speech = play_control
-        classifier_output = {"intent": "stop_request", "needs_motion": False}
+        op_cmds, control_speech, play_ctrl = play_control
+        classifier_output = {"intent": "ctrl_request", "needs_motion": False}
         planner_output = {
             "skills": [],
             "op_cmd": list(op_cmds),
             "speech": control_speech,
             "reason": f"연주 제어 키워드 감지 → 직접 처리 ({op_cmds or 'speech-only'})",
+            "play_ctrl": play_ctrl,
         }
-        return classifier_output, planner_output, "stop"
+        return classifier_output, planner_output, PLANNER_DOMAIN_CTRL
 
     # '안녕'과 '반가워'가 동시에 포함된 인사는 손 흔들기로 직접 처리한다.
     if _is_greeting_wave(user_text):
@@ -285,11 +382,13 @@ def planner_step(
     session=None,
     planner_model_name: str = PLANNER_MODEL,
     capture_metrics: bool = False,
-    repair_hint: Dict = None,
+    repair_hint: Optional[Dict] = None,
+    play_ctrl: Optional[Dict] = None,
 ) -> Tuple[Dict, Dict]:
     """
     2차 planner 단계. domain-specific planner LLM 을 호출해 plan 후보를 만든다.
     repair_hint 가 있으면(repair 도메인 호출) 직전 거부 사유를 입력에 함께 싣는다.
+    play_ctrl 이 있으면(notify 도메인 호출) 이미 실행된 연주 제어 내용을 입력에 싣는다.
 
     반환값:
         (planner_output, diag)
@@ -298,7 +397,7 @@ def planner_step(
     planner_system_prompt = get_planner_system_prompt(planner_domain)
     session_summary = build_session_summary(session) if session is not None else None
     planner_input = build_planner_input(
-        robot_state, user_text, classifier_output, planner_domain, session_summary, repair_hint
+        robot_state, user_text, classifier_output, planner_domain, session_summary, repair_hint, play_ctrl
     )
 
     start_time = time.time()

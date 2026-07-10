@@ -1,32 +1,8 @@
 import re
 from typing import Dict
 
-# 곡 코드는 Phil-drum-robot config/play_list.json 의 id 를 그대로 쓴다.
-SONG_LABELS = {
-    "TI": "This Is Me",
-    "TY": "그대에게",
-    "BI": "Baby I Need You",
-    "BF": "필인",
-    "DS": "드럼 솔로",
-    "WS": "왜그래",
-    "None": "None",
-}
-PLAY_SKILL_BY_SONG = {
-    "TI": "play_ti",
-    "TY": "play_ty",
-    "BI": "play_bi",
-    "BF": "play_bf",
-    "DS": "play_ds",
-    "WS": "play_ws",
-}
-SONG_QUERY_ALIASES = {
-    "TI": ["this is me", "디스 이즈 미", "디스이즈미", "tim"],
-    "TY": ["그대에게"],
-    "BI": ["baby i need you", "베이비 아이 니드 유", "bi"],
-    "BF": ["필인", "fillin", "fill in"],
-    "DS": ["드럼 솔로", "드럼솔로", "drum solo"],
-    "WS": ["왜그래", "왜 그래", "why so"],
-}
+# 곡 데이터는 songs.py 가 단일 소스다 — 여기서는 가져다 쓰기만 한다.
+from .songs import PLAY_SKILL_BY_SONG, SONG_CODES, SONG_LABELS, SONG_QUERY_ALIASES
 WAVE_REQUEST_KEYWORDS = ["손흔들", "손 흔들", "인사", "wave"]
 PLAY_REQUEST_SUFFIXES = ["해줘", "해주세요", "해", "줘", "틀어", "연주", "쳐", "시작"]
 ROBOT_NAME_ALIASES = {"필", "phil"}
@@ -56,7 +32,7 @@ REPERTOIRE_QUERY_PATTERNS = [
     re.compile(r"(노래|곡)\s*(목록|리스트)"),
     re.compile(r"레퍼토리"),
 ]
-AVAILABLE_SONG_CODES = ["TI", "TY", "BI", "BF", "DS", "WS"]
+AVAILABLE_SONG_CODES = SONG_CODES  # songs.py 파생 (레퍼토리 직답 나열 순서)
 IDENTITY_CONFIRMATION_PATTERN = re.compile(
     r"(?:너의\s*)?이름(?:은)?\s*([A-Za-z가-힣]+)\s*(맞(?:지|죠|니|나요)|이니|인가|인가요)"
 )
@@ -68,28 +44,6 @@ def adapt_robot_state(robot_state):
     get_robot_state_snapshot() 이 이미 deepcopy를 반환하므로 여기서 다시 복사하지 않는다.
     """
     return robot_state if isinstance(robot_state, dict) else {}
-
-
-def build_classifier_state_summary(robot_state: Dict) -> Dict:
-    """
-    classifier 는 의도 분류가 목적이므로 고수준 상태만 본다.
-    관절각 전체처럼 저수준 제어용 상태는 여기서 제외한다.
-    """
-    state_value = robot_state.get("state", 0)
-    is_fixed = robot_state.get("is_fixed", True)
-
-    summary = {
-        "mode": state_value,
-        "can_move": robot_state.get("is_lock_key_removed", False),
-        "busy": state_value != 0 or not is_fixed,
-        "current_song": robot_state.get("current_song", "None"),
-        "last_action": robot_state.get("last_action", "None"),
-    }
-
-    if "error_message" in robot_state:
-        summary["error_message"] = robot_state["error_message"]
-
-    return summary
 
 
 def build_planner_state_summary(robot_state: Dict) -> Dict:

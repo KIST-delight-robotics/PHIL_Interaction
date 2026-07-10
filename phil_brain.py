@@ -3,6 +3,15 @@
 import os
 import time
 
+from runtime.console_log import init_log, console
+
+# whisper/MeloTTS 등 무거운 라이브러리는 import 시점에 경고를 터미널에 쏟아낸다.
+# 그 출력까지 로그 파일로 보내기 위해, 엔트리포인트 실행일 때는 다른 import 보다
+# 먼저 stdout/stderr 리디렉션을 건다.
+if __name__ == "__main__":
+    LOG_PATH = init_log()
+    console("📁 실행 로그: {}".format(LOG_PATH))
+
 import numpy as np
 import psutil
 import whisper
@@ -45,8 +54,10 @@ def load_runtime():
     """
     bot = RobotClient(host=HOST, port=PORT)
     if not bot.connect():
-        print("연결 실패")
+        console("연결 실패")
         return None, None, None
+
+    console("⏳ 모델 로딩 중... (TTS/STT, 잠시 걸립니다)")
 
     base_mem = get_mem_usage()
     print(f"[{time.strftime('%H:%M:%S')}] 초기 메모리: {base_mem:.2f} MB")
@@ -64,6 +75,7 @@ def load_runtime():
 
     warm_up_stt_model(stt_model)
     print("✅[STT] 준비 완료!")
+    console("✅ 준비 완료. 말씀해 주세요.")
     return bot, tts, stt_model
 
 
@@ -202,6 +214,9 @@ def main():
             if not user_text:
                 continue
 
+            console("")
+            console(" 나: {}".format(user_text))
+
             # cross-turn 복구(되묻기) 진행 중인지 안내한다.
             if session.pending_intent:
                 print(f"💬 [복구 대기 회차 {session.recovery_count}] 원래 요청: {session.pending_intent}")
@@ -219,7 +234,7 @@ def main():
             # executor 는 백그라운드에서 명령을 보내고, TTS 는 메인 스레드에서 호출한다.
             speech = final_state.get("speech", "")
             if speech:
-                print(f"🤖 Phil: {speech}")
+                console(" 필: {}".format(speech))
                 # TTS 재생 구간 동안 리스너를 막아 self-echo 를 차단한다.
                 listener.set_speaking(True)
                 tts.speak(speech, stream=True)
@@ -239,7 +254,7 @@ def main():
                 )
 
     except KeyboardInterrupt:
-        print("\n종료합니다.")
+        console("\n종료합니다.")
     finally:
         listener.close()
         bot.close()

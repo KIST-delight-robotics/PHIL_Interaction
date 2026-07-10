@@ -8,16 +8,18 @@ phil_robot per-turn FSM (imperative).
 개념상 state(step)와 transition 이 있는 작은 상태기계지만, 명시적 전이표 대신
 run_turn() 의 호출 순서 + for 루프로 엮는다.
 
-  preprocess → classify → state → direct_answer → (planner ⇄ validator) → execute
+  preprocess → classify → state → direct_answer → (planner ⇄ validator) → execute → notify
 
 단계별 책임:
-  preprocess     : prefilter(pause/resume/인사). 맞으면 _shortcut 으로 표시.
+  preprocess     : prefilter(pause/resume/인사) + 턴당 1회 robot_state fetch. 맞으면 _shortcut.
   classify       : classifier LLM 으로 intent 결정 (robot_state 불필요). shortcut 이면 통과.
-  state          : planner 직전 fresh robot_state fetch (cross-turn 복구의 핵심).
+  state          : preprocess 스냅샷 재사용 (preprocess 를 건너뛴 giveup 턴만 fetch).
   direct_answer  : 상태/정체/레퍼토리 직답 shortcut. 맞으면 planner 통과.
   planner⇄validator : repair 루프. validator 가 거부하면 사유(repair_hint)를 실어
                       planner(repair 도메인)로 재호출. 최대 MAX_REPAIR 회, 소진 시 fallback.
   execute        : Executor 로 명령 비동기 전송. plan_type==motion 이면 Home Watcher.
+  notify         : 연주 제어 shortcut 턴만 — 이미 전송된 제어 결과(play_ctrl)로 LLM 이
+                   대사를 생성해 speech 를 교체. 실패 시 prefilter 고정 문구 유지.
 
 PhilState 딕셔너리 하나가 단계 사이를 굴러다니고, 각 step 은 필요한 키만 갱신한다.
 prefilter/direct_answer 가 답을 만들면 `_shortcut` 으로 LLM step(classify/planner)을 건너뛴다.
@@ -42,7 +44,7 @@ from .brain_pipeline import (
 from .command_validator import has_actionable_motion_command
 from .exec_thread import Executor
 from .failure import FALLBACK_MESSAGE
-from .planner import PLANNER_DOMAIN_REPAIR, select_planner_domain
+from .planner import PLANNER_DOMAIN_NOTIFY, PLANNER_DOMAIN_REPAIR, select_planner_domain
 from .skills import get_skill_categories
 from .state_adapter import adapt_robot_state
 from .validator import build_validated_plan
@@ -169,18 +171,19 @@ def make_preprocess_step(get_state_fn: Callable):
     """
     preprocess: prefilter(연주 제어 pause/stop/speed/resume + 인사).
     맞으면 classifier 호출 없이 planner_output 을 채우고 `_shortcut=True` 로 표시한다.
-    연주 제어는 현재 상태(PLAYING 여부, play_speed)에 의존하므로 스냅샷을 여기서도 읽는다.
-    (planner 용 fresh fetch 는 여전히 state step 이 담당한다.)
+    턴당 GET_STATUS 는 여기 1회가 전부다 — 읽은 스냅샷을 PhilState 에 실어
+    state step 이하(planner/validator)가 그대로 재사용한다.
     """
     def preprocess(state: PhilState) -> PhilState:
         robot_state = adapt_robot_state(get_state_fn())
         prefilter = build_prefilter_plan(state["user_text"], robot_state)
         if prefilter is None:
-            return state
+            return {**state, "robot_state": robot_state}
 
         classifier_output, planner_output, planner_domain = prefilter
         return {
             **state,
+            "robot_state": robot_state,
             "classifier_output": classifier_output,
             "planner_output": planner_output,
             "planner_domain": planner_domain,
@@ -218,11 +221,14 @@ def make_classify_step(classifier_model: str):
 
 def make_state_step(get_state_fn: Callable):
     """
-    state: planner 직전에 fresh robot_state 를 fetch 한다.
-    classifier LLM latency 만큼 지난 뒤의 최신 상태를 planner/validator 가 보게 하고,
-    cross-turn 복구(예: '키 뽑았어' 다음 턴)에서 세상 변화를 반영하는 핵심 지점이다.
+    state: preprocess 가 실어 둔 턴 시작 스냅샷을 그대로 쓴다 (재fetch 없음).
+    cross-turn 복구('키 뽑았어' 다음 턴)는 턴 진입 시점 fetch 로 충분하다 —
+    classifier latency(1~2초) 사이의 변화까지 다시 읽는 이득이 GET_STATUS 왕복보다 작다.
+    giveup 경로처럼 preprocess 를 건너뛴 턴에서만 여기서 fetch 한다.
     """
     def fetch_state(state: PhilState) -> PhilState:
+        if state.get("robot_state"):
+            return state
         robot_state = adapt_robot_state(get_state_fn())
         return {**state, "robot_state": robot_state}
 
@@ -422,6 +428,53 @@ def make_execute_step(executor: Executor, bot, get_state_fn: Callable):
     return execute
 
 
+def make_notify_step(planner_model: str):
+    """
+    notify: prefilter 가 rule-base 로 판정·전송까지 끝낸 연주 제어의 "대사"를 LLM 으로 만든다.
+
+    - execute 뒤에 온다 — 명령(정지/속도 등)은 이미 나갔고, 여기서는 speech 만 바꾼다.
+      (제어 지연 없음. 대사만 planner LLM latency 만큼 늦게 나온다.)
+    - 재료는 prefilter 가 planner_output 에 실어 둔 play_ctrl(행동/결과/속도 from→to/곡).
+    - validator 가 prefilter 명령을 거부해 repair 를 탔으면 planner_output 이 교체돼
+      play_ctrl 이 사라지므로 자연히 건너뛴다.
+    - LLM 이 실패하거나 빈/fallback 문장을 주면 prefilter 의 고정 문구를 그대로 둔다.
+    - notify 도메인 출력의 skills/op_cmd 는 needs_motion=False 강제 정리로 항상 비워진다
+      (enforce_intent_constraints) — 늦게 도착한 명령이 실행될 경로 자체가 없다.
+    """
+    def notify(state: PhilState) -> PhilState:
+        play_ctrl = dict((state.get("planner_output") or {}).get("play_ctrl") or {})
+        if not play_ctrl:
+            return state
+
+        planner_output, diag = planner_step(
+            state["robot_state"],
+            state["user_text"],
+            state["classifier_output"],
+            PLANNER_DOMAIN_NOTIFY,
+            None,
+            planner_model,
+            capture_metrics=True,
+            play_ctrl=play_ctrl,
+        )
+
+        debug = dict(state.get("debug", {}))
+        debug["notify_input"] = diag["planner_input"]
+        debug["notify_duration_sec"] = diag["duration_sec"]
+        debug["notify_metrics"] = diag["metrics"]
+
+        notify_speech = (planner_output.get("speech") or "").strip()
+        if not notify_speech or notify_speech == FALLBACK_MESSAGE:
+            return {**state, "debug": debug}  # 고정 문구 유지
+
+        validated = state.get("validated")
+        if validated is not None:
+            validated.speech = notify_speech  # session 히스토리에도 최종 대사가 남게 한다
+
+        return {**state, "speech": notify_speech, "debug": debug}
+
+    return notify
+
+
 # ------------------------------------------------------------------
 # run_turn 빌드
 # ------------------------------------------------------------------
@@ -438,8 +491,8 @@ def build_run_turn(
     한 턴을 처리하는 run_turn(user_text) 함수를 만들어 반환한다.
     phil_brain.py 가 startup 에 한 번 호출하고, 매 턴 run_turn(user_text) 로 실행한다.
 
-    get_state_fn: () -> dict — 현재 로봇 상태 스냅샷. state step 의 fresh fetch 와
-                               홈 복귀 타이밍 폴링에 쓴다.
+    get_state_fn: () -> dict — 현재 로봇 상태 스냅샷. preprocess 의 턴당 1회 fetch 와
+                               (비활성 상태인) 홈 복귀 워처에 쓴다.
     """
     preprocess = make_preprocess_step(get_state_fn)
     classify = make_classify_step(classifier_model)
@@ -449,6 +502,7 @@ def build_run_turn(
     validator = make_validator_step()
     fallback = make_fallback_step()
     execute = make_execute_step(executor, bot, get_state_fn)
+    notify = make_notify_step(planner_model)
 
     def run_turn(user_text: str) -> PhilState:
         # cross-turn 복구 상태를 turn 진입에서 읽는다 (지속 상태는 session 이 보관).
@@ -506,6 +560,7 @@ def build_run_turn(
             state = fallback(state)
 
         state = execute(state)
+        state = notify(state)   # 연주 제어 shortcut 대사 생성 (명령 전송 후 — play_ctrl 없으면 통과)
         return state
 
     return run_turn

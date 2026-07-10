@@ -198,8 +198,8 @@
       }
     },
     "expected": {
-      "intent": "stop_request",
-      "planner_domain": "stop",
+      "intent": "ctrl_request",
+      "planner_domain": "ctrl",
       "valid_commands_any_of": [["POSE|shutdown"], ["POSE|home"], ["POSE|home", "POSE|shutdown"]],
       "speech_contains_any": ["종료", "안녕히", "중단"]
     }

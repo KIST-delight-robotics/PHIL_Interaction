@@ -804,10 +804,10 @@
       }
     },
     {
-      "id": "stop_request_basic",
+      "id": "_request_basic",
       "tags": [
         "smoke",
-        "stop"
+        ""
       ],
       "user_text": "종료해",
       "passed": false,
@@ -815,14 +815,14 @@
         {
           "name": "classifier.intent",
           "passed": true,
-          "expected": "stop_request",
-          "actual": "stop_request"
+          "expected": "_request",
+          "actual": "_request"
         },
         {
           "name": "planner.domain",
           "passed": true,
-          "expected": "stop",
-          "actual": "stop"
+          "expected": "",
+          "actual": ""
         },
         {
           "name": "validator.valid_op_cmds_any_of",
@@ -875,11 +875,11 @@
         }
       ],
       "actual": {
-        "intent": "stop_request",
+        "intent": "_request",
         "needs_motion": true,
         "needs_dialogue": true,
         "risk_level": "medium",
-        "planner_domain": "stop",
+        "planner_domain": "",
         "skills": [
           "shutdown_system"
         ],
@@ -896,7 +896,7 @@
         "rejected_op_cmds": [],
         "speech": "지금은 해당 동작을 수행할 수 없습니다.",
         "reason": "shutdown request",
-        "classifier_raw_response_text": "{\n  \"intent\": \"stop_request\",\n  \"needs_motion\": false,\n  \"needs_dialogue\": true,\n  \"risk_level\": \"medium\"\n}",
+        "classifier_raw_response_text": "{\n  \"intent\": \"_request\",\n  \"needs_motion\": false,\n  \"needs_dialogue\": true,\n  \"risk_level\": \"medium\"\n}",
         "planner_raw_response_text": "{\"skills\":[\"shutdown_system\"],\"op_cmd\":[],\"speech\":\"종료하겠습니다.\",\"reason\":\"shutdown request\"}",
         "planner_called": true,
         "planner_parse_ok": true,
