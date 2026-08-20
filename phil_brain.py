@@ -5,9 +5,7 @@ import time
 
 from runtime.console_log import init_log, console
 
-# whisper/MeloTTS 등 무거운 라이브러리는 import 시점에 경고를 터미널에 쏟아낸다.
-# 그 출력까지 로그 파일로 보내기 위해, 엔트리포인트 실행일 때는 다른 import 보다
-# 먼저 stdout/stderr 리디렉션을 건다.
+# 무거운 import(whisper/MeloTTS)의 경고까지 로그로 보내려고 리디렉션을 가장 먼저 건다
 if __name__ == "__main__":
     LOG_PATH = init_log()
     console("📁 실행 로그: {}".format(LOG_PATH))
@@ -24,9 +22,6 @@ from runtime.melo_engine import TTS_Engine
 from runtime.mic_listener import MicListener
 from runtime.phil_client import RobotClient
 
-# ==========================================
-# Config
-# ==========================================
 HOST = "127.0.0.1"
 PORT = 1951
 
@@ -48,10 +43,7 @@ def warm_up_stt_model(stt_model):
 
 
 def load_runtime():
-    """
-    대화 루프에 필요한 런타임 객체를 준비한다.
-    phil_brain.py 는 객체 생성과 메인 루프 orchestration에만 집중한다.
-    """
+    """대화 루프 런타임(bot/TTS/STT) 준비."""
     bot = RobotClient(host=HOST, port=PORT)
     if not bot.connect():
         console("연결 실패")
@@ -175,15 +167,10 @@ def main():
 
     tts.speak("대화 준비가 되었습니다. 말씀해 주세요.")
 
-    # 세션 단기 기억
     session = SessionContext()
-
-    # ── Executor 초기화 ──────────────────────────────────────────────────
     executor = Executor(bot)
 
-    # ── FSM(run_turn) 빌드 ────────────────────────────────────────────────
-    # get_session() 은 클로저로 최신 session 객체를 반환한다.
-    # session 은 매 턴 끝에 재할당되므로 직접 참조 대신 getter 를 쓴다.
+    # session 은 매 턴 재할당되므로 getter 로 최신 객체를 넘긴다
     def get_session():
         return session
 
@@ -191,15 +178,12 @@ def main():
         bot=bot,
         executor=executor,
         get_session=get_session,
-        # 배경 폴링 없이 턴 시작 시점에만 GET_STATUS 를 보내 fresh 상태를 얻는다.
-        get_state_fn=bot.fetch_state_snapshot,
+        get_state_fn=bot.fetch_state_snapshot,   # 배경 폴링 없음 — 턴 시작 1회 fetch
         classifier_model=CLASSIFIER_MODEL,
         planner_model=PLANNER_MODEL,
     )
 
-    # ── 마이크 리스너 시작 ────────────────────────────────────────────────
-    # VAD(임계값) 기반으로 말이 끝날 때까지 알아서 듣고,
-    #  확정된 발화만 큐로 넘긴다. 리스너가 발화 단위를 만든다.
+    # VAD 리스너 — 확정된 발화만 큐로 넘어온다
     listener = MicListener()
     listener.start()
 
@@ -223,15 +207,9 @@ def main():
 
             print("🧠 생각 중...")
 
-            # ── FSM 한 턴 실행 ────────────────────────────────────────────
-            # fresh robot_state fetch 는 state step 이 담당한다. phil_brain 은
-            # user_text 만 넘기고 최종 speech/commands 만 읽는다(PhilState 하나가
-            # step 사이를 굴러다니는 구조).
             final_state = run_turn(user_text)
 
-            # ── TTS 메인 스레드에서 호출 ─────────────────────────────────
-            # MeloTTS(내부 PyTorch + C 라이브러리)는 스레드 안전하지 않다.
-            # executor 는 백그라운드에서 명령을 보내고, TTS 는 메인 스레드에서 호출한다.
+            # MeloTTS 는 스레드 비안전 — TTS 는 메인 스레드에서 (명령은 executor 백그라운드)
             speech = final_state.get("speech", "")
             if speech:
                 console(" 필: {}".format(speech))
@@ -240,7 +218,6 @@ def main():
                 tts.speak(speech, stream=True)
                 listener.set_speaking(False)
 
-            # ── 디버그 출력 + 세션 갱신 ───────────────────────────────────
             debug_from_state(final_state)
             print(f"[FSM] plan_type={final_state.get('plan_type')}")
 

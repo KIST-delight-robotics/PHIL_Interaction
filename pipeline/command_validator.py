@@ -1,27 +1,16 @@
 from dataclasses import dataclass, field
 from typing import List
 
-from .songs import SONG_CODES
-
-# 관절 한계 — Phil-drum-robot config/motors.json 과 동일 (drumrobot_client/main.py JOINTS 표)
-JOINT_LIMITS = {
-    "waist": (-90.0, 90.0),
-    "right_shoulder_1": (0.0, 150.0),
-    "left_shoulder_1": (30.0, 180.0),
-    "right_shoulder_2": (-60.0, 90.0),
-    "right_elbow": (0.0, 140.1),
-    "left_shoulder_2": (-60.0, 90.0),
-    "left_elbow": (0.0, 140.1),
-    "right_wrist": (-90.0, 100.0),
-    "left_wrist": (-90.0, 100.0),
-    "right_pedal": (-90.0, 200.0),
-    "left_pedal": (-90.0, 200.0),
-    "head_yaw": (-90.0, 90.0),
-    "head_pitch": (-100.0, 90.0),
-}
+# 관절 한계 — data/motors.json (서버 config 사본). motion_resolver 가 여기서 재수입한다.
+from .motor_config import JOINT_LIMITS
+from .songs import IMPROV_GENRE_CODES, SONG_CODES
 
 # 곡 코드 검증용 set — songs.py 파생
 PLAY_CODES = set(SONG_CODES)
+# 즉흥 장르 검증용 set — songs.py 파생. bpm 범위는 서버 handle_play 와 동일.
+IMPROV_GENRE_SET = set(IMPROV_GENRE_CODES)
+IMPROV_BPM_MIN = 1.0
+IMPROV_BPM_MAX = 250.0
 GESTURES = {"hi", "nod", "shake", "wave", "hurray", "happy"}
 POSES = {"init", "home", "ready", "shutdown"}
 # 연주 속도 배율 허용 범위 — 서버 PLAY_CTRL|speed 클램프와 동일
@@ -40,10 +29,7 @@ class ValidationResult:
 
 
 def validate_commands(commands, robot_state):
-    """
-    LLM이 만든 명령 문자열을 실행 전에 검증한다.
-    parser는 형식 해석, validator는 실행 가능 여부 판단에 집중한다.
-    """
+    """LLM 이 만든 명령을 실행 전에 검증한다 (형식 + 실행 가능 여부)."""
     result = ValidationResult()
 
     for command in commands:
@@ -63,10 +49,7 @@ def validate_commands(commands, robot_state):
 
 
 def normalize_command(command):
-    """
-    opcode 는 대소문자를 표준화한다 (서버도 대소문자 무시).
-    예: play|TI -> PLAY|TI, pause -> PAUSE
-    """
+    """opcode 대소문자 표준화 (play|TI → PLAY|TI)."""
     normalized = (command or "").strip()
     if not normalized:
         return ""
@@ -144,9 +127,37 @@ def validate_resume_command(command, robot_state):
 
 def validate_play_command(command, robot_state):
     args = _split_args(command)
-    if not args or args[0] not in PLAY_CODES:
+    if not args:
         return False, f"알 수 없는 곡 코드 차단: {command}"
 
+    if args[0].lower() == "improv":
+        return validate_improv_command(command, args, robot_state)
+
+    if args[0] not in PLAY_CODES:
+        return False, f"알 수 없는 곡 코드 차단: {command}"
+
+    return validate_play_state(command, robot_state)
+
+
+def validate_improv_command(command, args, robot_state):
+    """PLAY|improv[|<장르>[|<bpm>]] — 장르 생략은 전체 장르, bpm 은 1~250 (서버와 동일)."""
+    genre_code = args[1].lower() if len(args) >= 2 else ""
+    if genre_code and genre_code not in IMPROV_GENRE_SET:
+        return False, f"알 수 없는 즉흥 장르 차단: {command}"
+
+    if len(args) >= 3 and args[2]:
+        try:
+            bpm_value = float(args[2])
+        except ValueError:
+            return False, f"즉흥 bpm 파싱 실패: {command}"
+        if not (IMPROV_BPM_MIN <= bpm_value <= IMPROV_BPM_MAX):
+            return False, f"즉흥 bpm 허용치({IMPROV_BPM_MIN:g}~{IMPROV_BPM_MAX:g}) 밖 차단: {command}"
+
+    return validate_play_state(command, robot_state)
+
+
+def validate_play_state(command, robot_state):
+    """연주 시작 공통 상태 게이트 — 안전키/에러/이동 중 차단 + IDLE 에서만 시작."""
     allowed, reason = validate_motion_allowed(command, robot_state)
     if not allowed:
         return False, reason
@@ -199,10 +210,7 @@ def validate_gesture_command(command, robot_state):
 
 
 def validate_move_command(command, robot_state):
-    """
-    MOVE|<joint>|<deg>|<joint>|<deg>|...|<move_time>
-    (joint, deg) 쌍을 검증하고, 홀수로 남는 마지막 인자는 move_time 으로 해석한다.
-    """
+    """MOVE|<joint>|<deg>|... — (관절,각) 쌍 검증, 홀수로 남는 마지막 인자는 move_time."""
     allowed, reason = validate_motion_allowed(command, robot_state)
     if not allowed:
         return False, reason

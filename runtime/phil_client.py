@@ -1,13 +1,9 @@
 # phil_client.py
 """
-Phil-drum-robot 서버(TCP 1951, `|` opcode 프로토콜)용 클라이언트.
+Phil-drum-robot 서버(TCP 1951, `|` opcode) 클라이언트.
 
-- 명령: pipeline 이 만든 와이어 명령(PLAY|TI, PAUSE, MOVE|... 등)을 그대로 전송 (fire-and-forget)
-- 상태: 서버 push 가 없으므로 GET_STATUS 로 조회한다. 배경 폴링은 하지 않고
-  턴 시작 시점에만 on-demand 로 요청한다 (fetch_state_snapshot) — 서버 로그 스팸 방지.
-- 시작: 서버는 START -> (사람이 고정 키 제거) -> READY 순서를 요구한다.
-  connect() 안에서 키보드 입력으로 이 핸드셰이크를 진행한다.
-- 서버는 동시 1 클라이언트만 수락하므로 phil_brain 이 유일한 연결이어야 한다.
+명령은 fire-and-forget, 상태는 턴 시작 시 GET_STATUS 1회(배경 폴링 없음),
+시작은 START → 키 제거 → READY 핸드셰이크. 서버는 동시 1 클라이언트만 수락한다.
 """
 
 import socket
@@ -19,29 +15,18 @@ from typing import Dict, Optional
 
 from .console_log import console, console_input, take_cmd_flag
 
+# GET_STATUS 응답의 관절각 순서 — data/motors.json (서버 config 사본) 의 id 순서.
+# phil_brain 모드(phil_robot 이 cwd)와 패키지 모드(phil_robot.runtime.*) 를 모두 지원한다.
+try:
+    from pipeline.motor_config import JOINT_ORDER
+except ImportError:
+    from ..pipeline.motor_config import JOINT_ORDER
+
 ANGLE_UPDATE_DEADBAND_DEG = 0.2
 ANGLE_LOG_DEADBAND_DEG = 0.5
 STATUS_REPLY_TIMEOUT_SEC = 2.0
 
-# GET_STATUS 응답의 관절각 순서 (= motors.json id 순서, drumrobot_client/main.py JOINTS 와 동일)
-JOINT_ORDER = [
-    "waist",
-    "right_shoulder_1",
-    "left_shoulder_1",
-    "right_shoulder_2",
-    "right_elbow",
-    "left_shoulder_2",
-    "left_elbow",
-    "right_wrist",
-    "left_wrist",
-    "right_pedal",
-    "left_pedal",
-    "head_yaw",
-    "head_pitch",
-]
-
-# 서버 state 문자열 -> 기존 숫자 게이트 호환값
-# (0: idle, 2: playing, 6: 차단 상태 — command_validator 의 상태 게이트 유지용)
+# 서버 state 문자열 → 숫자 게이트 호환값 (0 idle / 2 playing / 6 차단)
 STATE_CODE_MAP = {
     "STANDBY": 0,
     "INIT": 0,
@@ -50,7 +35,7 @@ STATE_CODE_MAP = {
     "SHUTTINGDOWN": 6,
 }
 
-# 안전키(고정 키) 제거 완료로 간주하는 상태 — START/READY 핸드셰이크 이후
+# 안전키 제거 완료로 간주하는 상태 (START/READY 이후)
 KEY_REMOVED_STATES = {"IDLE", "PLAYING", "SHUTTINGDOWN"}
 
 # 로봇의 상태를 기억할 전역 변수 (초기값은 robot_poses.json 의 home 포즈)
@@ -83,12 +68,7 @@ def get_robot_state_snapshot():
 
 
 def parse_status(line: str) -> Optional[Dict]:
-    """
-    STATUS|<state>|<q0>..<q12>|<speed>|<pause_valid>|<pause_id>|<pause_bar>
-    를 ROBOT_STATE 갱신용 dict 로 번역한다. 형식이 아니면 None.
-    재개 지점(pause_*) 필드는 서버 내부 판단용이라 brain 은 읽지 않는다.
-    (구형 서버의 관절각+speed 만 있는 응답도 허용한다.)
-    """
+    """STATUS|<state>|<q0..q12>|<speed>|<pause_*3> → 상태 dict (형식 아니면 None). pause_* 는 brain 이 안 읽는다."""
     parts = [p.strip() for p in line.strip().split("|")]
     if not parts or parts[0] != "STATUS" or len(parts) < 2:
         return None
@@ -134,9 +114,7 @@ def parse_status(line: str) -> Optional[Dict]:
 
 
 def _merge_angle_state(previous_angles, incoming_angles, deadband_deg):
-    """
-    미세한 각도 노이즈는 이전 값을 유지해 Python 쪽 상태도 덜 흔들리게 만든다.
-    """
+    """미세 각도 노이즈는 이전 값 유지 (deadband)."""
     merged_angles = copy.deepcopy(previous_angles) if isinstance(previous_angles, dict) else {}
     if not isinstance(incoming_angles, dict):
         return merged_angles
@@ -156,9 +134,7 @@ def _merge_angle_state(previous_angles, incoming_angles, deadband_deg):
 
 
 def _state_changed_meaningfully(previous_state, current_state):
-    """
-    출력용 비교는 각도 미세 변화에 둔감하게 만들어 로그 채터링을 줄인다.
-    """
+    """출력용 비교 — 각도 미세 변화에 둔감하게 해 로그 채터링을 줄인다."""
     if previous_state is None:
         return True
 
@@ -230,7 +206,6 @@ def _brief_state_line(previous_state, current_state):
 
 class RobotClient:
 
-    # 클라이언트 소켓 생성자
     def __init__(self, host, port):
         self.host = host
         self.port = port
@@ -241,7 +216,6 @@ class RobotClient:
         self._last_printed = None            # 마지막으로 출력한 상태 (변경시에만 로그)
         self._sent_song = "None"             # 마지막으로 PLAY 를 보낸 곡 코드 (current_song 추적용)
 
-    # 소켓 연결
     def connect(self):
         """로봇(C++) 서버에 연결될 때까지 재시도 후 START/READY 핸드셰이크 진행"""
         console(f"로봇 서버 ({self.host}:{self.port})에 연결 시도..")
@@ -275,13 +249,8 @@ class RobotClient:
         self._send_line("READY")
         console("✅ 로봇 준비 완료 (IDLE). 이제 음성으로 명령할 수 있습니다.")
 
-    # 상태 조회 (on-demand)
     def fetch_state_snapshot(self):
-        """
-        GET_STATUS 를 1회 요청해 ROBOT_STATE 를 갱신하고 스냅샷을 반환한다.
-        run_turn 의 preprocess step 이 턴 시작 시점에 1회 호출한다 (배경 폴링 없음).
-        실패 시 마지막으로 알고 있던 스냅샷을 그대로 반환한다.
-        """
+        """GET_STATUS 1회로 ROBOT_STATE 갱신 후 스냅샷 반환. 실패 시 마지막 스냅샷."""
         global ROBOT_STATE
 
         with self.status_lock:
@@ -352,7 +321,6 @@ class RobotClient:
         with self.send_lock:
             self.sock.sendall((line + "\n").encode())
 
-    # 소켓 송신
     def send_command(self, cmd):
         """와이어 명령(예: 'PLAY|TI', 'PAUSE', 'POSE|home')을 그대로 전송한다."""
         if not self.sock:
@@ -369,18 +337,16 @@ class RobotClient:
             print(f"⚠️ 전송 실패: {e}")
             return False
 
-        # current_song 추적: 서버 상태에는 연주 중 곡 코드가 없어 클라이언트가 기억한다.
+        # current_song 은 클라이언트가 기억 (서버 미제공). improv 는 ':' 표기 (improv:funk:80)
         if wire_packet.startswith("PLAY|"):
-            self._sent_song = wire_packet.split("|", 1)[1]
+            self._sent_song = wire_packet.split("|", 1)[1].replace("|", ":")
 
-        # last_action: 서버가 알려주지 않으므로 마지막 전송 명령을 기억한다.
-        # (motion_resolver 의 "거기서 더" 관절 문맥 추론이 이 값을 읽는다.)
+        # last_action 도 클라이언트가 기억 — motion_resolver 의 "거기서 더" 문맥 추론용
         with STATE_LOCK:
             ROBOT_STATE["last_action"] = wire_packet
 
         return True
 
-    # 소켓 닫기
     def close(self):
         if self.sock:
             self.sock.close()

@@ -1,5 +1,10 @@
 # Change Log
 
+## 2026-08-20
+- 11:39 KST (UTC+9) — 즉흥 연주(improv) 지원 추가 + 프롬프트/데이터 외부화 리팩토링
+  - 수정 파일: `pipeline/state_adapter.py`, `pipeline/brain_pipeline.py`, `pipeline/command_validator.py`, `pipeline/songs.py`, `runtime/phil_client.py` 외 / 신규 `prompts/*.md`, `data/{skills,motors,songs}.json`, `pipeline/data_files.py`, `pipeline/motor_config.py`, `tests/test_improv_request.py`
+  - 메모: (1) "즉흥" 발화를 prefilter에서 감지해 `PLAY|improv|<장르>|<bpm>` 직행 전송 (`detect_improv_request`, `validate_improv_command` — 장르 화이트리스트, bpm 1~250 서버와 동일). resume 판정에 "즉흥 지목 시 새 연주" 분기 추가. (2) 하드코딩 프롬프트를 `prompts/*.md`로, SKILL_LIBRARY/JOINT_LIMITS/곡 데이터를 `data/*.json`으로 외부화. (3) 장문 주석/독스트링 축약.
+
 ## 2026-06-17
 - 10:08 KST (UTC+9) — LLM/STT 없이 키보드로 명령을 직접 전송하는 수동 TCP 클라이언트 추가
   - 수정 파일: 신규 `tests/manual_client.py`

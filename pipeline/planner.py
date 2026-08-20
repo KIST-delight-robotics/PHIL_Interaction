@@ -1,13 +1,9 @@
-"""
-2차 planner LLM 계층.
-
-classifier 가 의도를 정리한 뒤, planner 는 그 결과를 바탕으로
-speech 와 skill/command plan 만 생성한다.
-"""
+"""2차 planner LLM 계층 — classifier 가 정한 의도로 speech 와 skill/command plan 을 만든다."""
 
 import json
 from typing import Dict, Optional, Set
 
+from .data_files import load_prompt_text
 from .failure import FALLBACK_MESSAGE, build_planner_failure_result, sanitize_message
 from .state_adapter import build_planner_state_summary
 from .skills import describe_skills_for_prompt, filter_skills_by_allowed_categories
@@ -18,7 +14,7 @@ PLANNER_RESPONSE_SCHEMA_EXAMPLE = {
     "c": [],
     "t": "안녕하세요!",
     "r": "simple greeting",
-    "q": None,  # clarification 필요 시 질문 문자열, 평소에는 null 또는 생략
+    "q": None,  # clarification 질문 (평소 null)
 }
 
 SKILL_CATALOG_TEXT = describe_skills_for_prompt()
@@ -29,11 +25,9 @@ PLANNER_DOMAIN_MOTION = "motion"
 PLANNER_DOMAIN_PLAY = "play"
 PLANNER_DOMAIN_STATUS = "status"
 PLANNER_DOMAIN_CTRL = "ctrl"
-# repair 는 intent 로부터 선택되지 않는다. validator 가 명령을 거부했을 때
-# repair 루프가 도메인을 이 값으로 강제하고 repair_hint 를 함께 넘긴다.
+# repair/notify 는 intent 선택이 아니라 run_turn 이 강제하는 도메인 —
+# repair 는 validator 거부 설명, notify 는 이미 전송된 연주 제어의 대사 생성.
 PLANNER_DOMAIN_REPAIR = "repair"
-# notify 도 intent 로부터 선택되지 않는다. prefilter 가 연주 제어(정지/일시정지/재개/속도)를
-# rule-base 로 판정·전송한 뒤, 그 결과(play_ctrl)를 사용자에게 들려줄 대사만 생성한다.
 PLANNER_DOMAIN_NOTIFY = "notify"
 
 INTENT_TO_DOMAIN = {
@@ -48,8 +42,7 @@ INTENT_TO_DOMAIN = {
 DOMAIN_ALLOWED_SKILL_CATEGORIES: Dict[str, Set[str]] = {
     PLANNER_DOMAIN_CHAT: set(),
     PLANNER_DOMAIN_MOTION: {"social", "visual", "posture"},
-    # play 도메인에 posture 를 주면 planner 가 습관적으로 ready_pose 를 얹는다.
-    # 서버 PLAY 가 준비 자세를 내부 처리하므로 play 카테고리만 허용한다.
+    # play 에 posture 를 주면 ready_pose 를 습관적으로 얹는다 — 준비 자세는 서버 PLAY 내부 처리
     PLANNER_DOMAIN_PLAY: {"play"},
     PLANNER_DOMAIN_STATUS: set(),
     PLANNER_DOMAIN_CTRL: {"system"},
@@ -58,121 +51,26 @@ DOMAIN_ALLOWED_SKILL_CATEGORIES: Dict[str, Set[str]] = {
     PLANNER_DOMAIN_DEFAULT: {"social", "visual", "posture", "play", "system"},
 }
 
+# 도메인별 지시문과 공통 규칙 원문은 prompts/planner_*.md 에 있다.
 DOMAIN_INSTRUCTIONS = {
-    PLANNER_DOMAIN_CHAT: """당신은 chat planner 다.
-- 일반 대화, 인사, 잡담, 상식 질문에만 집중한다.
-- 기본값은 speech 중심 응답이다.
-- 특별히 로봇 동작이 꼭 필요하지 않으면 skills 와 op_cmd 는 빈 배열로 둔다.
-- 상태 설명이나 제어 결정을 과장하지 말고 짧고 자연스럽게 응답한다.""",
-    PLANNER_DOMAIN_MOTION: """당신은 motion planner 다.
-- 손, 팔, 손목, 허리, 시선, 제스처 같은 물리 동작 요청에 집중한다.
-- 가능한 경우 low-level command 보다 skill 을 우선 사용한다.
-- 고개/시선 방향 요청은 가능하면 look_left/look_right/look_up/look_down/look_forward 같은 visual skill 을 우선 사용한다.
-- 사용자가 손목, 허리, 특정 팔 같은 관절을 직접 말하면 그 관절 동작에 집중하고 unrelated social skill 로 치환하지 않는다.
-- 사용자가 짧게 "준비", "준비 자세"를 말하면 ready_pose 를 우선 고려한다.
-- 사용자가 "맞지?", "~이니?"처럼 예/아니오 확인을 몸짓으로 기대하는 질문을 하면 긍정은 nod_yes, 부정은 shake_no 를 우선 고려한다.
-- 이런 확인형 질문에서는 speech 에도 짧게 네/아니요와 핵심 내용(예: 이름은 필)을 함께 넣는다.
-- skill 로 표현하기 어려운 세부 관절 제어만 op_cmd 에 직접 쓴다.
-- 불가능하거나 unsafe 한 동작은 억지로 계획하지 말고 speech 를 통해 정중히 설명한다.""",
-    PLANNER_DOMAIN_PLAY: """당신은 play planner 다.
-- 곡 재생, 연주 시작 요청만 다룬다.
-- 가능한 경우 play 관련 skill 을 우선 사용한다.
-- 일반 social skill 이나 unrelated motion 은 넣지 않는다.
-- speech 는 곡 소개와 실행 의도를 짧고 자연스럽게 전달한다.""",
-    PLANNER_DOMAIN_STATUS: """당신은 status planner 다.
-- 현재 상태, 직전 행동, 에러 원인, 왜 멈췄는지 같은 질문에 집중한다.
-- 기본값은 speech 중심 응답이다.
-- 상태 설명에 굳이 물리 동작을 붙이지 않는다.
-- robot_state.current_angles 에 관절 각도 정보가 있으면, 특정 관절의 현재 각도 질문에 그 값을 직접 말해준다.
-- 이름, 정체, 자기소개를 묻는 질문이 들어오면 현재 상태 설명보다 필의 정체성을 우선 소개한다.
-- robot_state 에 직접 보이는 근거만 설명하고, current_song/progress 만으로 지금 연주 중이라고 추측하지 않는다. can_move=false 이고 busy=false 면 안전 키 상태를 먼저 설명한다.
-- 사과, 설명, 안내를 명확하게 하되 장황하게 늘어놓지 않는다.""",
-    PLANNER_DOMAIN_CTRL: """당신은 control planner 다.
-- 멈춤, 정지, 종료, 연주 재개, 연주 속도 조절 요청에 집중한다.
-- 멈춤·정지·중지·일시정지 요청은 전부 op_cmd 에 "PAUSE" 를 사용한다 — 나중에 멈춘 곳부터 이어서 연주할 수 있다.
-- 연주 재개(다시 해, 계속 해, 이어서 해) 요청에는 op_cmd 에 "RESUME" 을 사용한다.
-- 연주 중 속도 조절 요청에는 op_cmd 에 "PLAY_CTRL|speed|<배율>" 을 사용한다 (0.5~2.0, 예: PLAY_CTRL|speed|1.20).
-- speech 는 짧고 명확하게 현재 중단/재개 의도를 전달한다.
-- unrelated motion 이나 social skill 은 넣지 않는다.""",
-    PLANNER_DOMAIN_DEFAULT: """당신은 generic planner 다.
-- 입력 의도가 불명확할 때는 보수적으로 행동한다.
-- "왜?", "뭐?", "응?"처럼 짧고 맥락 없는 후속 발화는 이유를 추측하지 말고 무엇을 뜻하는지 짧게 되묻는다.
-- 과도한 동작 계획보다 speech 중심으로 응답한다.
-- 꼭 필요한 경우에만 op_cmd 또는 skills 를 생성한다.""",
-    PLANNER_DOMAIN_REPAIR: """당신은 repair planner 다.
-- 직전 시도가 validator 에서 거부됐고, 그 이유가 입력의 repair_hint 로 주어진다.
-- 동작을 다시 계획하지 말고, repair_hint 의 이유를 사용자에게 짧고 자연스럽게 설명하거나 되묻는다.
-- skills 와 op_cmd 는 반드시 [] 로 둔다. t(speech) 만 채운다.
-- t 는 사용자에게 그대로 들려줄 완성된 한국어 문장이다. repair_hint 문구를 옮겨 적지 말고 사람이 말하듯 바꾼다.""",
-    PLANNER_DOMAIN_NOTIFY: """당신은 notify planner 다.
-- 연주 제어(정지/일시정지/재개/속도)는 이미 규칙 기반으로 판정돼 로봇에 전송까지 끝났다.
-  그 결과가 입력의 play_ctrl 에 있다. 새 동작을 계획하지 말고 결과를 알리는 대사만 만든다.
-- skills 와 op_cmd 는 반드시 [] 로 둔다. t(speech) 만 채운다.
-- t 는 play_ctrl 내용을 사용자에게 들려줄 짧고 자연스러운 한국어 한두 문장이다.
-- executed 가 false 면 왜 실행되지 않았는지(result 참고: 연주 중 아님/이미 연주 중)를 안내한다.
-- action 이 speed 면 speed_from 에서 speed_to 로 바뀐다고 말한다.
-  result 가 at_limit 이면 이미 한계 속도라고, unchanged 면 이미 그 속도로 연주 중이라고 안내한다.
-  speed_req 가 있으면 요청 배속이 허용 범위를 벗어나 speed_to 로 맞췄다고 안내한다.
-- action 이 pause 면 멈추되 이어서 재개할 수 있음을, resume 이면 멈춘 부분부터 이어감을 자연스럽게 담는다.
-- song_label 이 있으면 곡 이름을 함께 언급해도 좋다.""",
+    domain: load_prompt_text(f"planner_{domain}.md")
+    for domain in (
+        PLANNER_DOMAIN_CHAT,
+        PLANNER_DOMAIN_MOTION,
+        PLANNER_DOMAIN_PLAY,
+        PLANNER_DOMAIN_STATUS,
+        PLANNER_DOMAIN_CTRL,
+        PLANNER_DOMAIN_DEFAULT,
+        PLANNER_DOMAIN_REPAIR,
+        PLANNER_DOMAIN_NOTIFY,
+    )
 }
 
-PLANNER_SHARED_RULES = f"""반드시 JSON 객체 하나만 출력한다. 설명문, 코드블록, 마크다운은 절대 출력하지 않는다.
-
-planner 입력에는 다음 정보가 함께 들어온다.
-- planner_domain: 현재 planner 도메인
-- robot_state: 현재 로봇 상태 요약
-- needs_motion: 실제 동작이 필요한 요청인지 여부
-- user_text: 사용자 발화
-- repair_hint: (repair 도메인에서만) 직전 시도가 validator 에서 거부된 이유
-- play_ctrl: (notify 도메인에서만) 이미 실행된 연주 제어의 내용과 결과
-
-공통 규칙:
-- 당신의 이름은 필(Phil)이며, KIST에서 개발된 지능형 휴머노이드 드럼 로봇이다.
-- planner_domain 을 반드시 따른다.
-- needs_motion 이 false 면 skills 와 op_cmd 를 모두 빈 배열로 둔다.
-- 필수 정보(예: 목표 각도)가 없으면 임의로 지어내지 말고 skills 와 op_cmd 를 비운다. 첫 시도에서 스스로 되묻지 않는다. 거부 사유는 validator 가 repair 도메인으로 돌려준다.
-- speech 는 TTS 용 한국어 문장만 쓴다. 괄호 설명문은 금지한다.
-- 명령 형식은 | 구분 opcode 이다. MOVE 명령은 MOVE|left_wrist|90 처럼 실제 관절 이름을 바로 쓴다.
-- 사용자가 각도/방향/속도 같은 파라미터를 말하지 않았으면 임의로 지어내거나 추측하지 말고 그 자리에 null 을 쓴다. 예: 각도 미지정 → MOVE|waist|null
-- LOOK 명령 형식은 LOOK|pan|tilt 이다. 정면은 0|0 이고, pan 은 왼쪽이 양수·오른쪽이 음수, tilt 는 아래가 양수·위가 음수다.
-- 사용자가 고개/시선/얼굴/정면/앞쪽을 직접 요청한 경우가 아니면 look_forward skill 이나 LOOK|0|0 명령을 추가하지 않는다.
-- 단순 인사, 손 흔들기, 팔 동작, 허리 동작, 연주 요청에 기본 시선 정렬을 습관적으로 덧붙이지 않는다.
-- low-level MOVE/LOOK 명령은 skill 로 표현하기 어려운 경우에만 op_cmd 에 직접 넣는다.
-
-사용 가능한 skill 카탈로그:
-{SKILL_CATALOG_TEXT}
-
-사용 가능한 low-level command 예시:
-- POSE|ready
-- POSE|home
-- PAUSE
-- RESUME
-- PLAY_CTRL|speed|1.20
-- LOOK|30|0
-- LOOK|-30|0
-- LOOK|0|-20
-- LOOK|0|20
-- GESTURE|wave
-- MOVE|left_wrist|90
-- MOVE|right_wrist|90
-- PLAY|TI
-
-출력 스키마:
-{{
-  "s": ["미리 정의된 skill"],
-  "c": ["low-level 명령"],
-  "t": "출력될 문장",
-  "r": "planner 판단 이유"
-}}
-
-출력 규칙:
-- 가능한 한 공백 없는 한 줄 JSON 으로 출력한다.
-- s 는 skill 문자열 배열이다. 없으면 [] 를 사용한다.
-- c 는 low-level command 문자열 배열이다. 없으면 [] 를 사용한다.
-- t 는 TTS 로 읽을 한국어 문장이다. 되묻기나 거절 설명도 t 에 담는다.
-- r 는 짧은 판단 이유다.
-"""
+# 공통 규칙의 {skill_catalog} 자리에 skill 카탈로그를 치환한다.
+# 프롬프트 안에 JSON 예시 중괄호가 있어 str.format 대신 replace 를 쓴다.
+PLANNER_SHARED_RULES = load_prompt_text("planner_shared.md").replace(
+    "{skill_catalog}", SKILL_CATALOG_TEXT
+)
 
 
 def select_planner_domain(classifier_output: Dict) -> str:
@@ -198,12 +96,7 @@ def build_planner_input(
     repair_hint: Optional[Dict] = None,
     play_ctrl: Optional[Dict] = None,
 ) -> str:
-    """
-    planner 에 넘길 입력 JSON 문자열을 만든다.
-    session_summary 가 있으면 최근 대화 히스토리와 마지막 동작 상태를 포함한다.
-    repair_hint 가 있으면(repair 도메인 호출) 직전 거부 사유를 포함한다.
-    play_ctrl 이 있으면(notify 도메인 호출) 이미 실행된 연주 제어 내용을 포함한다.
-    """
+    """planner 입력 JSON 생성 — session_summary/repair_hint/play_ctrl 이 있으면 포함한다."""
     state_summary = build_planner_state_summary(robot_state)
     needs_motion = bool(classifier_output.get("needs_motion", False))
 
@@ -235,10 +128,7 @@ def _sanitize_speech(speech: str) -> str:
 
 
 def parse_plan_response(response_text: str) -> Dict:
-    """
-    planner JSON 응답을 읽어 skill/op_cmd/speech 구조로 정리한다.
-    실패 시에도 이후 validator/executor 가 처리할 수 있는 기본형을 반환한다.
-    """
+    """planner JSON 응답 → skill/op_cmd/speech 구조. 실패해도 기본형을 반환한다."""
     result = build_planner_failure_result()
 
     if not isinstance(response_text, str):
@@ -278,10 +168,7 @@ def parse_plan_response(response_text: str) -> Dict:
 
 
 def enforce_intent_constraints(planner_output: Dict, classifier_output: Dict) -> Dict:
-    """
-    classifier 결과를 planner 뒤에서도 한 번 더 강제한다.
-    planner 가 습관적으로 gesture/look 를 붙여도 여기서 정리한다.
-    """
+    """classifier 결과를 planner 뒤에서 재강제 — 습관적 gesture/look 을 정리한다."""
     normalized = {
         "skills": list(planner_output.get("skills", [])),
         "op_cmd": list(planner_output.get("op_cmd", planner_output.get("commands", []))),

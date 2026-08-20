@@ -1,6 +1,7 @@
 import json
 import re
 
+from .data_files import load_prompt_text
 from .failure import build_classifier_failure_result
 from .songs import SONG_ALIAS_KEYWORDS
 from .state_adapter import (
@@ -73,46 +74,12 @@ AMBIGUOUS_FOLLOW_UPS = {
     "응왜",
 }
 
-CLASSIFIER_SYSTEM_PROMPT = """당신은 로봇 에이전트의 1차 intent classifier 다.
-반드시 JSON 객체 하나만 출력한다. 설명문, 코드블록, 마크다운은 절대 출력하지 않는다.
-가능하면 공백 없는 한 줄 JSON 으로 출력한다.
-
-출력 스키마:
-{"i":"C|M|P|Q|X|U","m":1}
-
-코드 의미:
-- i: intent
-  - C = chat
-  - M = motion_request
-  - P = play_request
-  - Q = status_question
-  - X = ctrl_request
-  - U = unknown
-- m: motion 필요 여부. 1 또는 0 만 사용한다.
-
-분류 기준:
-- chat: 일반 대화, 인사, 감정 표현, 상식 질문, 이름/정체/자기소개 질문
-- motion_request: 손/팔/허리/손목/시선/제스처 등 물리 동작 요청
-- play_request: 연주 시작/곡 재생/드럼 연주 요청
-- status_question: 현재 상태, 직전 행동, 왜 멈췄는지, 무엇을 했는지 질문
-- ctrl_request: 연주 제어 요청 — 일시정지(멈춰, 그만, 정지, 스톱), 연주 재개(다시 해, 계속 해, 이어서 해), 연주 속도 조절(더 빨리, 천천히)
-- unknown: 의도를 분명히 정할 수 없는 경우
-
-판단 규칙:
-- 물리 동작이 필요하면 m=1
-- "준비", "준비 자세"처럼 짧은 자세 전환 명령은 motion_request 로 보고 m=1 로 둔다.
-- "무슨 노래 연주할 수 있니?", "연주할 수 있는 곡이 뭐야?" 같은 곡 목록/레퍼토리 질문은 play_request 가 아니라 chat 로 보고 m=0 으로 둔다.
-- 이름/정체를 확인하면서 "맞지?", "~이니?"처럼 예/아니오를 몸으로 같이 보여줘야 하는 질문은 motion_request 로 보고 m=1 로 둔다.
-"""
+# classifier 프롬프트 원문은 prompts/classifier_system.md 에 있다.
+CLASSIFIER_SYSTEM_PROMPT = load_prompt_text("classifier_system.md")
 
 
 def build_classifier_input(user_text):
-    """
-    classifier 에 넘길 입력 JSON 문자열을 만든다.
-    intent 분류에만 집중하므로 robot_state 는 넣지 않는다.
-    (CLASSIFIER_SYSTEM_PROMPT 가 system_info 를 한 번도 참조하지 않던 dead token 이었다.
-     상태 판단은 state_node 와 validator 가 책임진다.)
-    """
+    """classifier 입력 JSON — robot_state 는 넣지 않는다 (상태 판단은 state step/validator 몫)."""
     return json.dumps(
         {
             "user_text": user_text,
@@ -189,10 +156,7 @@ def decode_intent(raw_intent):
 
 
 def extract_partial_intent_response(response_text):
-    """
-    모델 출력이 중간에서 끊겨도
-    앞부분의 핵심 필드는 최대한 회수한다.
-    """
+    """끊긴 모델 출력에서도 앞부분 핵심 필드를 회수한다."""
     if not isinstance(response_text, str):
         return build_classifier_failure_result()
 
@@ -213,10 +177,7 @@ def extract_partial_intent_response(response_text):
 
 
 def normalize_intent_result(intent_result, user_text):
-    """
-    classifier 결과를 코드에서 한 번 더 정규화한다.
-    이름/정체 질문처럼 반복되는 오분류는 deterministic rule 로 보정한다.
-    """
+    """classifier 결과 정규화 — 반복 오분류(이름/정체 등)를 deterministic rule 로 보정."""
     result = dict(intent_result or DEFAULT_INTENT_RESULT)
     normalized_text = (user_text or "").strip()
 
@@ -291,10 +252,7 @@ def looks_like_play_request(user_text):
 
 
 def is_ambiguous_follow_up(user_text):
-    """
-    history 없이 해석하기 어려운 초단문 후속 발화를 감지한다.
-    이런 입력은 planner 자유 생성보다 clarification 으로 처리하는 편이 안전하다.
-    """
+    """history 없이 해석 불가한 초단문 후속 발화 감지 — clarification 처리 대상."""
     normalized_text = (user_text or "").strip()
     condensed_text = re.sub(r"[\s\?\!\.\,~]+", "", normalized_text)
     return condensed_text in AMBIGUOUS_FOLLOW_UPS

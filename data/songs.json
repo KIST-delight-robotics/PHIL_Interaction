@@ -1,0 +1,42 @@
+{
+    "songs": {
+        "TI": {
+            "label": "This Is Me",
+            "skill": "play_ti",
+            "aliases": ["this is me", "디스 이즈 미", "디스이즈미", "tim"]
+        },
+        "TY": {
+            "label": "그대에게",
+            "skill": "play_ty",
+            "aliases": ["그대에게"]
+        },
+        "BI": {
+            "label": "Baby I Need You",
+            "skill": "play_bi",
+            "aliases": ["baby i need you", "베이비 아이 니드 유", "bi"]
+        },
+        "BF": {
+            "label": "필인",
+            "skill": "play_bf",
+            "aliases": ["필인", "fillin", "fill in"]
+        },
+        "DS": {
+            "label": "드럼 솔로",
+            "skill": "play_ds",
+            "aliases": ["드럼 솔로", "드럼솔로", "drum solo"]
+        },
+        "WS": {
+            "label": "왜그래",
+            "skill": "play_ws",
+            "aliases": ["왜그래", "왜 그래", "why so"]
+        }
+    },
+    "improv_genres": {
+        "country": {"label": "컨트리", "aliases": ["컨트리", "country"]},
+        "funk": {"label": "펑크", "aliases": ["펑크", "funk"]},
+        "hiphop": {"label": "힙합", "aliases": ["힙합", "hiphop"]},
+        "jazz": {"label": "재즈", "aliases": ["재즈", "째즈", "jazz"]},
+        "pop": {"label": "팝", "aliases": ["팝", "pop"]},
+        "rock": {"label": "락", "aliases": ["락", "록", "rock"]}
+    }
+}

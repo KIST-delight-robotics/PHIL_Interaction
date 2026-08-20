@@ -1,10 +1,4 @@
-"""
-Executor — 로봇 명령을 백그라운드 스레드에서 순서대로 전송한다.
-
-전송 자체는 거의 즉시라 사실 동기로 해도 무방하다(보내도 로봇이 실제로 움직이는 데
-시간이 걸려 TTS 와의 체감 순서 차이가 없다). 비동기로 두는 건 큰 이득이라기보다
-나중을 위한 여지 정도다.
-"""
+"""Executor — 로봇 명령을 백그라운드 스레드에서 순서대로 전송한다."""
 
 import threading
 import time
@@ -12,9 +6,7 @@ from typing import Callable, List, Optional
 
 from runtime.console_log import cmd_flag_pending, console, mark_cmd_sent
 
-# 명령 전송 후 상태 반영을 확인하는 조회 시점(초). 첫 조회에서 변화가 안 보이면
-# 한 번 더 기다렸다 본다. MOVE/POSE/GESTURE 는 동작 시간(기본 ~3초)이 지나야
-# 최종 각도가 잡히므로 첫 조회를 더 늦게 잡는다.
+# 전송 후 상태 반영 확인 조회 시점(초) — motion 은 동작(~3초) 뒤에야 각도가 잡힌다.
 _MOTION_FETCH_DELAYS = (3.5, 2.0)
 _QUICK_FETCH_DELAYS = (1.0, 2.5)
 _MOTION_CMD_PREFIXES = ("MOVE|", "POSE|", "GESTURE|", "HIT|")
@@ -50,8 +42,7 @@ class Executor:
             try:
                 if self._bot.send_command(cmd) is not False:
                     sent_ok = True
-                    # 다음 상태 갱신 1회를 터미널에 보여주기 위한 플래그 (phil_client 가 소비)
-                    mark_cmd_sent()
+                    mark_cmd_sent()   # 다음 상태 1회 출력 플래그 (phil_client 소비)
                 else:
                     console(f"⚠️ 명령 전송 실패: {cmd}")
             except Exception as exc:
@@ -66,15 +57,10 @@ class Executor:
             print(f"⚠️ [Executor] on_done 콜백 오류: {exc}")
 
     def _report_state(self, commands: List[str]) -> None:
-        """
-        명령이 로봇 상태에 반영될 때쯤 상태를 조회해, "변한 상태 한 줄"이 다음 턴
-        시작까지 밀리지 않고 명령 직후 터미널에 뜨게 한다. 실제 출력은 phil_client 의
-        fetch_state_snapshot 이 cmd 플래그를 소비하며 수행하고, 여기서 변화를 못 잡으면
-        플래그가 남아 다음 턴 시작 조회가 대신 잡는다.
-        """
+        """명령 반영 시점에 상태를 조회해 변화 한 줄을 바로 띄운다. 못 잡으면 다음 턴 조회가 잡는다."""
         fetch_state = getattr(self._bot, "fetch_state_snapshot", None)
         if fetch_state is None:
-            return  # eval/test 의 fake bot 은 상태 조회가 없다
+            return  # eval/test 의 fake bot
 
         motion_like = any(cmd.startswith(_MOTION_CMD_PREFIXES) for cmd in commands)
         fetch_delays = _MOTION_FETCH_DELAYS if motion_like else _QUICK_FETCH_DELAYS

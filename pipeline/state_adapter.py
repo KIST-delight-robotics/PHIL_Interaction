@@ -2,7 +2,14 @@ import re
 from typing import Dict
 
 # 곡 데이터는 songs.py 가 단일 소스다 — 여기서는 가져다 쓰기만 한다.
-from .songs import PLAY_SKILL_BY_SONG, SONG_CODES, SONG_LABELS, SONG_QUERY_ALIASES
+from .songs import (
+    IMPROV_GENRE_LABELS,
+    IMPROV_GENRES,
+    PLAY_SKILL_BY_SONG,
+    SONG_CODES,
+    SONG_LABELS,
+    SONG_QUERY_ALIASES,
+)
 WAVE_REQUEST_KEYWORDS = ["손흔들", "손 흔들", "인사", "wave"]
 PLAY_REQUEST_SUFFIXES = ["해줘", "해주세요", "해", "줘", "틀어", "연주", "쳐", "시작"]
 ROBOT_NAME_ALIASES = {"필", "phil"}
@@ -39,18 +46,12 @@ IDENTITY_CONFIRMATION_PATTERN = re.compile(
 
 
 def adapt_robot_state(robot_state):
-    """
-    C++에서 온 상태 스냅샷을 그대로 pipeline에 넘긴다.
-    get_robot_state_snapshot() 이 이미 deepcopy를 반환하므로 여기서 다시 복사하지 않는다.
-    """
+    """상태 스냅샷을 그대로 전달 (이미 deepcopy 라 재복사 없음)."""
     return robot_state if isinstance(robot_state, dict) else {}
 
 
 def build_planner_state_summary(robot_state: Dict) -> Dict:
-    """
-    planner 역시 고수준 상태 요약만 사용한다.
-    실제 관절각/세부 제어 정보는 Python resolver 와 validator 가 사용한다.
-    """
+    """planner 용 고수준 상태 요약 (세부 관절각은 resolver/validator 몫)."""
     state_value = robot_state.get("state", 0)
     is_fixed = robot_state.get("is_fixed", True)
 
@@ -77,12 +78,8 @@ def build_planner_state_summary(robot_state: Dict) -> Dict:
 
 def block_reason_of(robot_state: Dict) -> str:
     """
-    현재 robot_state 가 motion/play 를 막는 단일 사유 코드를 만든다.
-    validator(repair 사유)와 planner state 요약이 같은 판정을 쓰도록 한 곳에 둔다.
-
-    반환값: "safety_key" | "playing" | "error" | "moving" | "none"
-    우선순위는 안전 키 > 연주 > 에러 > 이동 순이다.
-    (에러 state 표기가 코드 경로마다 4/6 으로 섞여 있어 둘 다 error 로 본다.)
+    동작을 막는 단일 사유 코드: safety_key > playing > error > moving > none.
+    (에러 state 표기가 경로마다 4/6 으로 섞여 있어 둘 다 error 로 본다.)
     """
     if not robot_state.get("is_lock_key_removed", False):
         return "safety_key"
@@ -97,10 +94,7 @@ def block_reason_of(robot_state: Dict) -> str:
 
 
 def detect_joint_angle_query(user_text: str):
-    """
-    사용자가 특정 관절의 "현재 각도"를 묻는 질의인지 감지한다.
-    각도 조회는 LLM 자유 생성보다 deterministic 응답이 더 안전하다.
-    """
+    """특정 관절의 현재 각도 질의 감지 — deterministic 직답 대상."""
     text = (user_text or "").strip()
     if not text or not ANGLE_QUERY_PATTERN.search(text):
         return None
@@ -153,6 +147,50 @@ def detect_song_request_code(user_text: str):
             return song_code
 
     return None
+
+
+# 즉흥 연주 감지 — "즉흥" 이 있으면 improv 요청으로 본다 (장르/bpm 은 선택).
+IMPROV_TRIGGER_WORD = "즉흥"
+# 능력/의미 질문("즉흥 연주 할 수 있어?")은 연주 시작이 아니라 classifier 로 보낸다.
+IMPROV_QUESTION_WORDS = ["수있", "가능", "뭐야", "뭐니", "무슨", "어떤"]
+IMPROV_BPM_PATTERNS = [
+    re.compile(r"(\d+(?:\.\d+)?)\s*(?:비피엠|bpm)"),
+    re.compile(r"(?:비피엠|bpm)\s*(\d+(?:\.\d+)?)"),
+]
+
+
+def detect_improv_request(user_text: str):
+    """'즉흥' 발화 → {genre, genre_label, bpm} 또는 None. bpm 범위 검증은 command_validator 몫."""
+    text = (user_text or "").strip().lower()
+    if IMPROV_TRIGGER_WORD not in text:
+        return None
+
+    condensed_text = re.sub(r"\s+", "", text)
+    if any(word in condensed_text for word in IMPROV_QUESTION_WORDS):
+        return None
+
+    # 장르가 여러 개 언급되면 발화에서 먼저 나온 쪽을 쓴다.
+    genre_code = None
+    genre_pos = len(condensed_text) + 1
+    for code, genre_info in IMPROV_GENRES.items():
+        for alias in genre_info["aliases"]:
+            alias_pos = condensed_text.find(alias)
+            if 0 <= alias_pos < genre_pos:
+                genre_code = code
+                genre_pos = alias_pos
+
+    bpm_value = None
+    for pattern in IMPROV_BPM_PATTERNS:
+        matched = pattern.search(condensed_text)
+        if matched:
+            bpm_value = float(matched.group(1))
+            break
+
+    return {
+        "genre": genre_code,
+        "genre_label": IMPROV_GENRE_LABELS.get(genre_code, ""),
+        "bpm": bpm_value,
+    }
 
 
 def detect_wave_play_request(user_text: str):

@@ -1,9 +1,4 @@
-"""
-plan 단위 validator 레이어.
-
-planner 가 만든 결과를 바로 실행하지 않고,
-skill 전개 -> 상대 동작 해석 -> 명령 검증 -> 메시지 보정까지 한 번에 책임진다.
-"""
+"""plan 단위 validator — skill 전개 → 상대 동작 해석 → 명령 검증 → 메시지 보정."""
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -19,13 +14,7 @@ from .state_adapter import block_reason_of
 
 @dataclass
 class RepairHint:
-    """
-    validator 가 planner 명령을 거부했을 때, repair 도메인 planner 에게 돌려줄 사유.
-
-    repair 루프가 이 hint 를 planner 입력에 실어, planner 가 명령을 다시 만들지 말고
-    사용자에게 이유를 설명/되묻게 한다. failure_code 는 흐름 제어용 거친 분류이고,
-    reason 은 사람이 읽을 수 있는 거부 이유(planner 가 풀어 설명할 재료)다.
-    """
+    """거부 사유 — repair planner 입력에 실린다. failure_code 는 흐름 제어용, reason 은 설명 재료."""
 
     failure_code: str = ""
     reason: str = ""
@@ -34,11 +23,7 @@ class RepairHint:
 
 @dataclass
 class ValidatedPlan:
-    """
-    planner 결과가 validator 를 지나면서 만들어지는 최종 실행 단위.
-
-    이 객체부터는 executor 가 바로 소비할 수 있다.
-    """
+    """validator 를 통과한 최종 실행 단위 — executor 가 바로 소비한다."""
 
     skills: List[str] = field(default_factory=list)
     raw_op_cmds: List[str] = field(default_factory=list)
@@ -49,9 +34,7 @@ class ValidatedPlan:
     warnings: List[str] = field(default_factory=list)
     speech: str = ""
     reason: str = ""
-    # planner 명령이 거부돼 repair 가 필요할 때 채워진다.
-    # None 이면 통과(또는 빈 명령). 채워져 있으면 graph 가 repair 루프로 보낸다.
-    repair_hint: Optional[RepairHint] = None
+    repair_hint: Optional[RepairHint] = None   # 거부 시 채워짐 — run_turn 이 repair 루프로 보낸다
 
 
 def _content_failure_code(warnings: List[str]) -> str:
@@ -61,6 +44,10 @@ def _content_failure_code(warnings: List[str]) -> str:
         return "missing_info"
     if "한계" in text or "범위 초과" in text:
         return "joint_limit"
+    if "즉흥 장르" in text:
+        return "unknown_genre"
+    if "즉흥 bpm" in text:
+        return "bpm_range"
     if "곡 코드" in text:
         return "unknown_song"
     if "연주 명령 차단" in text:
@@ -78,10 +65,7 @@ def build_validated_plan(
     classifier_output: Dict,
     planner_output: Dict,
 ) -> ValidatedPlan:
-    """
-    classifier + planner 결과를 실제 실행 가능한 plan 으로 정리한다.
-    이 단계가 끝나면 phil_brain.py 는 더 이상 명령 보정 규칙을 알 필요가 없다.
-    """
+    """classifier+planner 결과를 실행 가능한 plan 으로 확정한다."""
     skill_op_cmds, skill_warnings = expand_skills(planner_output.get("skills", []))
     planner_op_cmds = list(planner_output.get("op_cmd", planner_output.get("commands", [])))
     expanded_op_cmds = skill_op_cmds + planner_op_cmds
@@ -95,17 +79,14 @@ def build_validated_plan(
 
     speech = planner_output.get("speech", "")
 
-    # validator 는 speech 작가가 아니라 안전망이다.
-    # 상대 동작 해석 같은 결정적 계산 결과만 speech 에 반영한다.
-    # 막힘/범위/거부 안내는 planner 가 repair 도메인에서 직접 만든다(아래 repair_hint).
-    # (연주 속도 제어는 prefilter 가 speed:<x> 명령으로 직접 처리한다 — 사전 속도 modifier 폐기)
+    # validator 는 speech 작가가 아니라 안전망 — 결정적 해석 결과만 반영하고,
+    # 거부 안내는 repair 도메인 planner 가 만든다.
     if resolution.message_override:
         speech = resolution.message_override
     elif resolution.speech_override and has_actionable_motion_command(validation.valid_commands):
         speech = resolution.speech_override
 
-    # planner 명령이 (전부) 거부돼 실행할 동작이 없으면 repair 사유를 만든다.
-    # graph 가 이 hint 를 repair 도메인 planner 로 돌려보내 설명/되묻기를 생성하게 한다.
+    # 명령이 전부 거부돼 실행할 동작이 없으면 repair 사유를 만든다
     repair_hint = None
     if validation.rejected_commands and not has_actionable_motion_command(validation.valid_commands):
         block = block_reason_of(robot_state)

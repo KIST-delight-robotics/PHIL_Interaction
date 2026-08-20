@@ -1,34 +1,13 @@
 """
-phil_robot per-turn FSM (imperative).
-
-한 사용자 턴의 흐름을 step 들의 고정 순서 + repair 루프 하나로 표현한다.
-예전엔 경량 StateGraph(langgraph shim)로 노드/엣지를 선언했지만, 흐름이
-"고정 체인 + 분기 1~2개" 수준이라 graph 추상화의 이득(선언적 edge, langgraph 이관)이
-없어 imperative 로 바꿨다. (Jetson Python 3.8 에서는 진짜 langgraph 설치/이관도 사실상 불가.)
-개념상 state(step)와 transition 이 있는 작은 상태기계지만, 명시적 전이표 대신
-run_turn() 의 호출 순서 + for 루프로 엮는다.
+phil_robot per-turn FSM — 한 사용자 턴을 고정 step 체인 + repair 루프로 처리한다.
 
   preprocess → classify → state → direct_answer → (planner ⇄ validator) → execute → notify
 
-단계별 책임:
-  preprocess     : prefilter(pause/resume/인사) + 턴당 1회 robot_state fetch. 맞으면 _shortcut.
-  classify       : classifier LLM 으로 intent 결정 (robot_state 불필요). shortcut 이면 통과.
-  state          : preprocess 스냅샷 재사용 (preprocess 를 건너뛴 giveup 턴만 fetch).
-  direct_answer  : 상태/정체/레퍼토리 직답 shortcut. 맞으면 planner 통과.
-  planner⇄validator : repair 루프. validator 가 거부하면 사유(repair_hint)를 실어
-                      planner(repair 도메인)로 재호출. 최대 MAX_REPAIR 회, 소진 시 fallback.
-  execute        : Executor 로 명령 비동기 전송. plan_type==motion 이면 Home Watcher.
-  notify         : 연주 제어 shortcut 턴만 — 이미 전송된 제어 결과(play_ctrl)로 LLM 이
-                   대사를 생성해 speech 를 교체. 실패 시 prefilter 고정 문구 유지.
-
-PhilState 딕셔너리 하나가 단계 사이를 굴러다니고, 각 step 은 필요한 키만 갱신한다.
-prefilter/direct_answer 가 답을 만들면 `_shortcut` 으로 LLM step(classify/planner)을 건너뛴다.
-단 경로 자체는 그대로라 validator(skill 전개·최종 commands/speech 추출)와 execute 는 거친다
-— executor 직행이 아니다. (rule-base 결과도 validator 를 통해 최종 명령/발화로 변환된다.)
-
-cross-turn recovery 는 세 군데로 나뉜다: 지속 상태(recovery_count/pending_intent)는 session,
-턴-간 반복은 phil_brain 의 while 루프, 매 턴 진입에서 그 session 상태를 읽어 giveup/continue 를
-고르는 분기는 run_turn(여기) 이 한다.
+- prefilter/direct_answer 적중 시 _shortcut 으로 LLM step 을 건너뛴다.
+  단 validator/execute 는 항상 거친다 (rule-base 결과도 최종 명령/발화로 변환).
+- validator 거부 시 사유(repair_hint)를 실어 repair 도메인 planner 로 재호출한다.
+- 턴 사이 미해결 요청은 session 의 recovery 상태로 잇는다.
+- 상세 설계/전환 기록: docs/LANGGRAPH_STATE_MACHINE_KR.md
 """
 
 import threading
@@ -52,17 +31,15 @@ from .validator import build_validated_plan
 if TYPE_CHECKING:
     from .validator import ValidatedPlan
 
-# 한 턴 안에서 planner⇄validator 가 핑퐁할 수 있는 최대 repair 호출 수.
-# 보통 1회면 수렴한다(거부 → planner 가 빈 명령+설명). 소진되면 fallback 으로 끝낸다.
+# 턴 내 repair 재호출 한도 — 소진 시 fallback
 MAX_REPAIR = 2
 
-# cross-turn 복구가 이 횟수만큼 미해결로 이어지면 planner 없이 giveup(결정적 리셋)한다.
-# (사람이 MAX_RECOVERY 번 시도하도록 두고, 그 다음 턴은 deterministic 안내로 끝낸다.)
+# cross-turn 복구 한도 — 초과 턴은 planner 없이 giveup 리셋
 MAX_RECOVERY = 4
 _GIVEUP_MESSAGE = "죄송해요, 잘 이해하지 못했어요. 처음부터 다시 말씀해 주세요."
 _CANCEL_WORDS = {"취소", "취소해", "아니", "아니야", "됐어", "관둬", "안해", "안 해"}
 
-# 이 intent 들은 "동작을 해야 하는" 요청이다. 빈 계획으로 끝나면 되묻기(repair/recovery) 대상.
+# 빈 계획으로 끝나면 되묻기(repair/recovery) 대상인 intent
 _ACTIONABLE_INTENTS = {"motion_request", "play_request"}
 
 
@@ -72,61 +49,37 @@ def _needs_action(classifier_output: dict) -> bool:
 
 
 class PhilState(TypedDict, total=False):
-    """
-    한 턴의 step 사이를 전달되는 데이터 묶음.
-    run_turn() 이 user_text 로 초기화하고, 각 step 이 필요한 키만 갱신한다.
-    """
-    # ── 입력 ──────────────────────────────────────────────────────────
+    """한 턴의 step 사이를 굴러다니는 데이터 묶음 — 각 step 이 필요한 키만 갱신한다."""
     user_text: str
 
-    # ── 흐름 제어 ─────────────────────────────────────────────────────
-    _shortcut: bool        # prefilter/direct_answer 가 planner_output 을 이미 만들었는가
-    _recovery: bool        # cross-turn 복구 continuation (classify 건너뛰고 pending 도메인 이어감)
-    repair_attempt: int    # 이번 턴 repair 도메인 재호출 횟수 (디버그용; 루프는 run_turn 이 제어)
-    repair_hint: dict      # validator 가 거부하며 돌려준 사유. 비어있지 않으면 planner 가 repair 호출
+    _shortcut: bool        # prefilter/direct_answer 가 planner_output 을 이미 만듦
+    _recovery: bool        # 복구 continuation (classify 건너뜀)
+    repair_attempt: int    # repair 재호출 횟수 (디버그용)
+    repair_hint: dict      # validator 거부 사유 — 비어있지 않으면 repair 호출
 
-    # ── classify ──────────────────────────────────────────────────────
     classifier_output: dict
     planner_domain: str
-
-    # ── state ─────────────────────────────────────────────────────────
     robot_state: dict
-
-    # ── planner ───────────────────────────────────────────────────────
     planner_output: dict
 
-    # ── validator (최종 출력) ─────────────────────────────────────────
     plan_type: str        # "motion" | "play" | "stop" | "chat" | "none"
-    speech: str           # 필이 할 말
-    commands: List[str]   # 실제 전송할 명령 목록
-    validated: object     # ValidatedPlan (session 갱신/디버그용)
-
-    # ── 디버그 (런타임 출력용, eval 과 무관) ──────────────────────────
+    speech: str
+    commands: List[str]
+    validated: object     # ValidatedPlan
     debug: dict
 
 
-# ------------------------------------------------------------------
-# plan_type 판단 헬퍼
-# ------------------------------------------------------------------
+# ── plan_type 판단 ──────────────────────────────────────────────────
 
-# 이 카테고리 skill 이 포함된 플랜은 실행 후 홈 복귀 대상이다.
+# 실행 후 홈 복귀 대상인 skill 카테고리
 _HOME_RETURN_CATEGORIES = {"social", "posture"}
 
-# LOOK|* 같은 시선 명령만 있을 때는 홈 복귀를 하지 않는다.
+# 시선 명령만 있으면 홈 복귀 제외
 _LOOK_ONLY_PREFIXES = ("LOOK|",)
 
 
 def _infer_plan_type(validated_plan: "ValidatedPlan", classifier_intent: str) -> str:
-    """
-    ValidatedPlan 과 classifier intent 를 보고 plan_type 을 결정한다.
-
-    반환값:
-      "motion" - 홈 복귀가 필요한 gesture/posture/move 계열
-      "play"   - 연주 시작 (홈 복귀 없음)
-      "stop"   - 정지 명령 (홈 복귀 없음)
-      "chat"   - 대화 응답만 (명령 없음)
-      "none"   - 명령도 없고 의미 있는 분류도 없음
-    """
+    """plan_type 결정 — motion(홈 복귀 대상) / play / stop / chat / none."""
     # skill 기반 판단
     skill_names = list(getattr(validated_plan, "skills", []) or [])
     if skill_names:
@@ -159,21 +112,14 @@ def _infer_plan_type(validated_plan: "ValidatedPlan", classifier_intent: str) ->
 
 
 def _extract_commands(validated_plan: "ValidatedPlan") -> List[str]:
-    """전송할 명령 목록을 만든다. (사전 속도 modifier 폐기 — 검증 통과 명령이 전부다)"""
+    """전송 목록 = 검증 통과 명령 전부."""
     return list(getattr(validated_plan, "valid_op_cmds", []) or [])
 
 
-# ------------------------------------------------------------------
-# Step 빌더 — 클로저로 외부 의존성(session getter, 모델명 등)을 주입한다.
-# ------------------------------------------------------------------
+# ── step 빌더 (클로저로 의존성 주입) ─────────────────────────────────
 
 def make_preprocess_step(get_state_fn: Callable):
-    """
-    preprocess: prefilter(연주 제어 pause/stop/speed/resume + 인사).
-    맞으면 classifier 호출 없이 planner_output 을 채우고 `_shortcut=True` 로 표시한다.
-    턴당 GET_STATUS 는 여기 1회가 전부다 — 읽은 스냅샷을 PhilState 에 실어
-    state step 이하(planner/validator)가 그대로 재사용한다.
-    """
+    """preprocess: prefilter 적중 시 _shortcut. 턴당 GET_STATUS 는 여기 1회뿐 — 이후 step 이 재사용."""
     def preprocess(state: PhilState) -> PhilState:
         robot_state = adapt_robot_state(get_state_fn())
         prefilter = build_prefilter_plan(state["user_text"], robot_state)
@@ -220,12 +166,7 @@ def make_classify_step(classifier_model: str):
 
 
 def make_state_step(get_state_fn: Callable):
-    """
-    state: preprocess 가 실어 둔 턴 시작 스냅샷을 그대로 쓴다 (재fetch 없음).
-    cross-turn 복구('키 뽑았어' 다음 턴)는 턴 진입 시점 fetch 로 충분하다 —
-    classifier latency(1~2초) 사이의 변화까지 다시 읽는 이득이 GET_STATUS 왕복보다 작다.
-    giveup 경로처럼 preprocess 를 건너뛴 턴에서만 여기서 fetch 한다.
-    """
+    """state: preprocess 스냅샷 재사용. preprocess 를 건너뛴 턴(giveup)에서만 fetch."""
     def fetch_state(state: PhilState) -> PhilState:
         if state.get("robot_state"):
             return state
@@ -252,15 +193,7 @@ def make_direct_answer_step():
 
 
 def make_planner_step(planner_model: str, get_session: Callable):
-    """
-    planner: planner LLM 호출.
-
-    - repair_hint 가 있으면(직전 validator 거부) repair 도메인으로 재호출한다.
-      repair 는 shortcut 보다 우선한다 — 거부된 shortcut(예: 막힘 상태의 인사 제스처)도
-      repair 로 설명/되묻기를 만들어야 하기 때문이다.
-    - repair_hint 도 없고 shortcut 이면 통과.
-    - 그 외에는 intent 도메인으로 일반 계획.
-    """
+    """planner: repair_hint 있으면 repair 도메인 — 거부된 shortcut 도 설명이 필요해 shortcut 보다 우선."""
     def planner(state: PhilState) -> PhilState:
         repair_hint = state.get("repair_hint") or {}
 
@@ -326,9 +259,8 @@ def make_validator_step():
                 "rejected": list(hint.rejected),
             }
 
-        # missing-info: 첫 시도(repair 도메인이 아님)인데 동작이 필요한 의도가 실행 명령을
-        # 하나도 못 냈으면(빈 계획) repair 로 보내 "무엇을/몇 도?"를 되묻게 한다.
-        # repair 도메인 출력은 빈 계획이 정상이므로 이 트리거에서 제외한다(무한 루프 방지).
+        # missing-info: actionable 인데 빈 계획이면 repair 로 되묻는다.
+        # repair 도메인 출력은 빈 계획이 정상이라 제외 (무한 루프 방지).
         if (
             not repair_hint
             and state.get("planner_domain") != PLANNER_DOMAIN_REPAIR
@@ -354,10 +286,7 @@ def make_validator_step():
 
 
 def make_fallback_step():
-    """
-    fallback: repair 루프가 끝내 수렴 못 한 희귀 케이스.
-    명령을 전부 버리고(안전) 결정적 안전 문구만 남긴다.
-    """
+    """fallback: repair 소진 — 명령을 버리고 안전 문구만 남긴다."""
     def fallback(state: PhilState) -> PhilState:
         return {
             **state,
@@ -372,11 +301,8 @@ def make_fallback_step():
 
 def home(bot, get_state_fn: Callable) -> None:
     """
-    [현재 비활성 — 런타임에서 호출하지 않는다]
-    구 DrumRobot2 의 is_fixed(움직임 중 플래그) 폴링 기반 홈 복귀 워처.
-    신 서버 GET_STATUS 에는 "움직이는 중" 신호가 없어 감지가 성립하지 않는다
-    (state 는 MOVE/GESTURE 중에도 IDLE 유지). 제스처 후 홈 복귀가 필요해지면
-    서버 상태 노출 또는 시간 기반으로 재설계한다.
+    [비활성] is_fixed 폴링 홈 복귀 워처 — 신 서버는 "움직이는 중" 신호가 없어 감지 불가.
+    필요해지면 서버 상태 노출 또는 시간 기반으로 재설계한다.
     """
     def _watch():
         # 1. 움직임 시작 대기 (is_fixed=False, 최대 1.5초). 미감지면 홈 복귀 건너뜀.
@@ -409,10 +335,7 @@ def home(bot, get_state_fn: Callable) -> None:
 
 
 def make_execute_step(executor: Executor, bot, get_state_fn: Callable):
-    """
-    execute: 로봇 명령을 Executor 로 비동기 전송한다.
-    Home Watcher 는 신 서버에서 감지 신호(is_fixed)가 없어 비활성 상태다 — home() 주석 참조.
-    """
+    """execute: 명령을 Executor 로 비동기 전송 (Home Watcher 비활성 — home() 참조)."""
     def execute(state: PhilState) -> PhilState:
         commands = state.get("commands", [])
 
@@ -430,16 +353,9 @@ def make_execute_step(executor: Executor, bot, get_state_fn: Callable):
 
 def make_notify_step(planner_model: str):
     """
-    notify: prefilter 가 rule-base 로 판정·전송까지 끝낸 연주 제어의 "대사"를 LLM 으로 만든다.
-
-    - execute 뒤에 온다 — 명령(정지/속도 등)은 이미 나갔고, 여기서는 speech 만 바꾼다.
-      (제어 지연 없음. 대사만 planner LLM latency 만큼 늦게 나온다.)
-    - 재료는 prefilter 가 planner_output 에 실어 둔 play_ctrl(행동/결과/속도 from→to/곡).
-    - validator 가 prefilter 명령을 거부해 repair 를 탔으면 planner_output 이 교체돼
-      play_ctrl 이 사라지므로 자연히 건너뛴다.
-    - LLM 이 실패하거나 빈/fallback 문장을 주면 prefilter 의 고정 문구를 그대로 둔다.
-    - notify 도메인 출력의 skills/op_cmd 는 needs_motion=False 강제 정리로 항상 비워진다
-      (enforce_intent_constraints) — 늦게 도착한 명령이 실행될 경로 자체가 없다.
+    notify: prefilter 가 전송까지 끝낸 연주 제어의 대사만 LLM 으로 다시 만든다 (execute 뒤라 제어 지연 없음).
+    repair 를 탔으면 play_ctrl 이 사라져 건너뛰고, LLM 실패/빈 문장이면 고정 문구를 유지한다.
+    notify 출력의 명령은 enforce_intent_constraints 가 항상 비운다.
     """
     def notify(state: PhilState) -> PhilState:
         play_ctrl = dict((state.get("planner_output") or {}).get("play_ctrl") or {})
@@ -475,9 +391,7 @@ def make_notify_step(planner_model: str):
     return notify
 
 
-# ------------------------------------------------------------------
-# run_turn 빌드
-# ------------------------------------------------------------------
+# ── run_turn 빌드 ────────────────────────────────────────────────────
 
 def build_run_turn(
     bot,
@@ -487,13 +401,7 @@ def build_run_turn(
     classifier_model: str,
     planner_model: str,
 ):
-    """
-    한 턴을 처리하는 run_turn(user_text) 함수를 만들어 반환한다.
-    phil_brain.py 가 startup 에 한 번 호출하고, 매 턴 run_turn(user_text) 로 실행한다.
-
-    get_state_fn: () -> dict — 현재 로봇 상태 스냅샷. preprocess 의 턴당 1회 fetch 와
-                               (비활성 상태인) 홈 복귀 워처에 쓴다.
-    """
+    """run_turn(user_text) 를 만들어 반환한다 — phil_brain 이 startup 에 한 번 호출."""
     preprocess = make_preprocess_step(get_state_fn)
     classify = make_classify_step(classifier_model)
     fetch_state = make_state_step(get_state_fn)
@@ -524,9 +432,7 @@ def build_run_turn(
         }
 
         if pending_intent and recovery_count >= MAX_RECOVERY:
-            # 복구가 한도를 넘겼다 → planner 없이 결정적 리셋 안내.
-            # _shortcut 으로 classify/planner 를 건너뛰고 validator 가 빈 계획을 확정한다.
-            # (이 턴은 chat 으로 분류되어 update_session 이 복구 스레드를 리셋한다.)
+            # 복구 한도 초과 → planner 없이 결정적 리셋 (chat 분류라 update_session 이 리셋)
             state["classifier_output"] = {"intent": "chat"}
             state["planner_output"] = {"skills": [], "op_cmd": [], "speech": _GIVEUP_MESSAGE, "reason": "recovery 한도 초과"}
             state["_shortcut"] = True
@@ -539,8 +445,7 @@ def build_run_turn(
                     state["planner_output"] = {"skills": [], "op_cmd": [], "speech": "알겠습니다. 그 요청은 취소할게요.", "reason": "사용자 취소"}
                     state["_shortcut"] = True
                 else:
-                    # classify 를 건너뛰고 원래 classifier/도메인을 재사용한다.
-                    # pending_intent 는 session_summary 로 planner 에 전달돼 이번 발화와 합쳐진다.
+                    # classify 건너뛰고 원래 classifier/도메인 재사용 (pending_intent 는 session_summary 로 전달)
                     state["classifier_output"] = dict(pending_classifier or {})
                     state["planner_domain"] = select_planner_domain(pending_classifier or {})
                     state["_recovery"] = True
@@ -549,8 +454,7 @@ def build_run_turn(
         state = fetch_state(state)
         state = direct_answer(state)   # shortcut/recovery 면 통과
 
-        # repair 루프: planner → validator, 거부되면 사유 싣고 다시 planner.
-        # MAX_REPAIR 회 안에 수렴 못 하면(else) fallback.
+        # repair 루프 — 거부되면 사유 싣고 재호출, 소진 시(else) fallback
         for _ in range(MAX_REPAIR + 1):
             state = planner(state)
             state = validator(state)
@@ -560,7 +464,7 @@ def build_run_turn(
             state = fallback(state)
 
         state = execute(state)
-        state = notify(state)   # 연주 제어 shortcut 대사 생성 (명령 전송 후 — play_ctrl 없으면 통과)
+        state = notify(state)   # play_ctrl 있을 때만 대사 재생성
         return state
 
     return run_turn
